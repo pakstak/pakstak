@@ -8,6 +8,7 @@ mod reference;
 mod repair;
 mod run;
 mod storage;
+mod switch;
 mod uninstall;
 mod update;
 
@@ -42,6 +43,13 @@ enum Command {
         /// Optional installed containers to update. If omitted, all containers are updated.
         containers: Vec<String>,
     },
+    /// Switch an installed container to a specific manifest digest.
+    Switch {
+        /// Installed container name.
+        container: String,
+        /// Manifest digest to switch to, for example sha256:...
+        digest: String,
+    },
     /// Remove cached manifests and layers that are not used by installed containers.
     Prune,
     /// Repair installed containers and check cached manifests and layers.
@@ -71,6 +79,10 @@ fn main() -> anyhow::Result<()> {
         Command::Update { containers } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
             update::update(&storage, containers)
+        }
+        Command::Switch { container, digest } => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            switch::switch(&storage, &container, &digest)
         }
         Command::Prune => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
