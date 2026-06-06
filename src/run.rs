@@ -17,21 +17,21 @@ pub fn run(ctx: &Context, app_alias: &str, command: Vec<String>) -> anyhow::Resu
         .join("apps")
         .join(app_alias)
         .join("manifest");
-    let manifest_hash = fs::read_to_string(&app_manifest_path).with_context(|| {
+    let manifest_digest = fs::read_to_string(&app_manifest_path).with_context(|| {
         format!(
             "failed to read app manifest {}",
             app_manifest_path.display()
         )
     })?;
-    let manifest_hash = manifest_hash.trim();
-    if manifest_hash.is_empty() {
+    let manifest_digest = manifest_digest.trim();
+    if manifest_digest.is_empty() {
         bail!("app manifest {} is empty", app_manifest_path.display());
     }
 
     let manifest_path = ctx
         .storage_path
         .join("manifests")
-        .join(format!("{manifest_hash}.json"));
+        .join(format!("{manifest_digest}.json"));
     let manifest_bytes = fs::read(&manifest_path)
         .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
     let manifest: ImageManifest = serde_json::from_slice(&manifest_bytes)
@@ -51,12 +51,7 @@ pub fn run(ctx: &Context, app_alias: &str, command: Vec<String>) -> anyhow::Resu
 
     let mut layer_paths = Vec::with_capacity(manifest.layers.len());
     for layer in &manifest.layers {
-        let layer_hash = layer
-            .digest
-            .split_once(':')
-            .map(|(_, hash)| hash)
-            .unwrap_or(&layer.digest);
-        let layer_path = ctx.storage_path.join("layers").join(layer_hash);
+        let layer_path = ctx.storage_path.join("layers").join(&layer.digest);
         if !layer_path.is_dir() {
             bail!(
                 "layer {} is missing at {}; install the image first",

@@ -70,7 +70,7 @@ pub fn install(ctx: &Context, alias: &str, image: &str) -> anyhow::Result<()> {
             )
         })?;
 
-    let manifest_hash = save_manifest(ctx, &fetched_manifest).with_context(|| {
+    let manifest_digest = save_manifest(ctx, &fetched_manifest).with_context(|| {
         format!(
             "failed to save manifest for {}/{}:{} under {}",
             image_ref.registry,
@@ -87,12 +87,7 @@ pub fn install(ctx: &Context, alias: &str, image: &str) -> anyhow::Result<()> {
     );
 
     for layer in &fetched_manifest.manifest.layers {
-        let digest_hash = layer
-            .digest
-            .split_once(':')
-            .map(|(_, hash)| hash)
-            .unwrap_or(&layer.digest);
-        let output_dir = ctx.storage_path.join("layers").join(digest_hash);
+        let output_dir = ctx.storage_path.join("layers").join(&layer.digest);
         if output_dir.exists() {
             eprintln!(
                 "layer {} already extracted to {}",
@@ -130,14 +125,14 @@ pub fn install(ctx: &Context, alias: &str, image: &str) -> anyhow::Result<()> {
         }
     }
 
-    publish_app(ctx, &app_dir, image, &image_ref, &manifest_hash).with_context(|| {
+    publish_app(ctx, &app_dir, image, &image_ref, &manifest_digest).with_context(|| {
         format!(
             "failed to publish app alias `{alias}` to {}",
             app_dir.display()
         )
     })?;
 
-    eprintln!("installed {image} as {alias} with manifest {manifest_hash}");
+    eprintln!("installed {image} as {alias} with manifest {manifest_digest}");
 
     Ok(())
 }
@@ -360,13 +355,12 @@ fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::R
         )
     })?;
 
-    let manifest_hash = manifest_hash(&fetched_manifest.digest);
-    let output_path = output_dir.join(format!("{manifest_hash}.json"));
+    let output_path = output_dir.join(format!("{}.json", fetched_manifest.digest));
 
     ctx.atomic_write(&output_path, &fetched_manifest.bytes)
         .with_context(|| format!("failed to write manifest to {}", output_path.display()))?;
 
-    Ok(manifest_hash)
+    Ok(fetched_manifest.digest.clone())
 }
 
 fn publish_app(
@@ -374,7 +368,7 @@ fn publish_app(
     app_dir: &Path,
     image: &str,
     image_ref: &ImageRef,
-    manifest_hash: &str,
+    manifest_digest: &str,
 ) -> anyhow::Result<()> {
     let temporary_app_dir = ctx.temporary_directory_for(app_dir)?;
     fs::create_dir_all(&temporary_app_dir).with_context(|| {
@@ -384,7 +378,7 @@ fn publish_app(
         )
     })?;
 
-    fs::write(temporary_app_dir.join("manifest"), manifest_hash).with_context(|| {
+    fs::write(temporary_app_dir.join("manifest"), manifest_digest).with_context(|| {
         format!(
             "failed to write temporary app manifest file in {}",
             temporary_app_dir.display()
@@ -414,14 +408,6 @@ fn publish_app(
     })?;
 
     ctx.publish_directory(&temporary_app_dir, app_dir)
-}
-
-fn manifest_hash(manifest_digest: &str) -> String {
-    manifest_digest
-        .split_once(':')
-        .map(|(_, hash)| hash)
-        .unwrap_or(manifest_digest)
-        .to_string()
 }
 
 fn extract_layer(reader: Box<dyn Read>, output_dir: &Path) -> anyhow::Result<()> {
