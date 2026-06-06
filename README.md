@@ -1,6 +1,6 @@
 # Pakstak
 
-Pakstak is an experiment in "containers for apps" and "universal packaging".
+Pakstak is an experiment in "containers for applications" and "universal packaging".
 
 It is inspired by Flatpak-style application isolation, but aims to be much simpler and to build on the shoulders of giants: OCI and Bubblewrap.
 
@@ -27,7 +27,7 @@ file structure.
 
 Hopefully, this can be addressed later. For now, we just trust that the filesystem stores
 the files correctly and that neither the user nor the OS modifies those files.
-They are mounted read-only inside the container built for the app
+They are mounted read-only inside the sandbox built for the installed container
 and normally cannot be modified from inside the container.
 If you have any suspicion that layer directories have been modified, the only option
 for now is to reinstall them.
@@ -44,7 +44,7 @@ Install an image:
 pakstak install my_alpine alpine:latest
 ```
 
-Run a command from an installed manifest:
+Run a command from an installed container:
 
 ```sh
 pakstak run my_alpine -- /bin/sh

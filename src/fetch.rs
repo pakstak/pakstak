@@ -1,8 +1,9 @@
 use crate::digest;
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
+use crate::reference::Reference;
 use crate::storage::StorageMutable;
 use anyhow::{Context as _, anyhow, bail};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::{BufReader, Read};
 
 const DOCKER_AUTH: &str = "https://auth.docker.io/token";
@@ -13,114 +14,6 @@ const LAYER_ACCEPT: &str = "application/vnd.oci.image.layer.v1.tar+gzip, applica
 struct AuthToken {
     token: Option<String>,
     access_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ImageRef {
-    pub registry: String,
-    pub repository: String,
-    pub reference: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AppMetadata {
-    pub source: AppSourceMetadata,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AppSourceMetadata {
-    pub image: String,
-    pub registry: String,
-    pub image_name: String,
-    pub reference: String,
-    pub tag: Option<String>,
-    pub digest: Option<String>,
-}
-
-impl AppMetadata {
-    pub fn from_image(image: &str, image_ref: &ImageRef) -> Self {
-        Self {
-            source: AppSourceMetadata {
-                image: image.to_string(),
-                registry: image_ref.registry.clone(),
-                image_name: image_ref.repository.clone(),
-                reference: image_ref.reference.clone(),
-                tag: (!image_ref.reference.contains(':')).then_some(image_ref.reference.clone()),
-                digest: image_ref
-                    .reference
-                    .contains(':')
-                    .then_some(image_ref.reference.clone()),
-            },
-        }
-    }
-}
-
-impl ImageRef {
-    pub fn parse(input: &str) -> anyhow::Result<Self> {
-        let name = if let Some((name, _digest)) = input.split_once('@') {
-            name
-        } else {
-            let last_slash = input.rfind('/');
-            let last_colon = input.rfind(':');
-            if let Some(colon) = last_colon {
-                if last_slash.is_none_or(|slash| colon > slash) {
-                    &input[..colon]
-                } else {
-                    input
-                }
-            } else {
-                input
-            }
-        };
-
-        let reference = if let Some((_name, digest)) = input.split_once('@') {
-            digest
-        } else {
-            let last_slash = input.rfind('/');
-            let last_colon = input.rfind(':');
-            if let Some(colon) = last_colon {
-                if last_slash.is_none_or(|slash| colon > slash) {
-                    &input[colon + 1..]
-                } else {
-                    "latest"
-                }
-            } else {
-                "latest"
-            }
-        };
-        let mut parts = name.split('/');
-        let first = parts.next().context("image name is empty")?;
-
-        let (registry, repository) =
-            if first.contains('.') || first.contains(':') || first == "localhost" {
-                let rest = parts.collect::<Vec<_>>().join("/");
-                if rest.is_empty() {
-                    bail!("image repository is missing");
-                }
-                (first.to_string(), rest)
-            } else {
-                let repository = if name.contains('/') {
-                    name.to_string()
-                } else {
-                    format!("library/{name}")
-                };
-                ("registry-1.docker.io".to_string(), repository)
-            };
-
-        Ok(Self {
-            registry,
-            repository,
-            reference: reference.to_string(),
-        })
-    }
-
-    pub fn from_metadata(metadata: &AppMetadata) -> Self {
-        Self {
-            registry: metadata.source.registry.clone(),
-            repository: metadata.source.image_name.clone(),
-            reference: metadata.source.reference.clone(),
-        }
-    }
 }
 
 pub struct RegistryClient {
@@ -256,19 +149,19 @@ impl RegistryClient {
     }
 }
 
-pub fn validate_alias(alias: &str) -> anyhow::Result<()> {
-    if alias.is_empty() {
-        bail!("app alias cannot be empty");
+pub fn validate_container(container: &str) -> anyhow::Result<()> {
+    if container.is_empty() {
+        bail!("container name cannot be empty");
     }
-    if alias == "." || alias == ".." {
-        bail!("app alias `{alias}` is not allowed");
+    if container == "." || container == ".." {
+        bail!("container name `{container}` is not allowed");
     }
-    if !alias
+    if !container
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         bail!(
-            "app alias `{alias}` contains invalid characters; use only ASCII letters, numbers, dots, underscores, and dashes"
+            "container name `{container}` contains invalid characters; use only ASCII letters, numbers, dots, underscores, and dashes"
         );
     }
 
@@ -277,21 +170,16 @@ pub fn validate_alias(alias: &str) -> anyhow::Result<()> {
 
 pub fn fetch_image(
     storage: &StorageMutable,
-    image_ref: &ImageRef,
+    reference: &Reference,
 ) -> anyhow::Result<FetchedManifest> {
-    let client = RegistryClient::new(image_ref.registry.clone(), image_ref.repository.clone())
-        .with_context(|| {
-            format!(
-                "failed to initialize registry client for {}/{}",
-                image_ref.registry, image_ref.repository
-            )
-        })?;
+    let client = RegistryClient::new(reference.registry.clone(), reference.repository.clone())
+        .with_context(|| format!("failed to initialize registry client for {reference}"))?;
     let fetched_manifest = client
-        .fetch_image_manifest(&image_ref.reference)
+        .fetch_image_manifest(reference.manifest_reference())
         .with_context(|| {
             format!(
-                "failed to fetch manifest `{}` from {}/{}",
-                image_ref.reference, image_ref.registry, image_ref.repository
+                "failed to fetch manifest `{}` for {reference}",
+                reference.manifest_reference()
             )
         })?;
 
@@ -357,41 +245,4 @@ fn fetch_layers(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_default_docker_library_image() {
-        let image = ImageRef::parse("alpine").unwrap();
-        assert_eq!(image.registry, "registry-1.docker.io");
-        assert_eq!(image.repository, "library/alpine");
-        assert_eq!(image.reference, "latest");
-    }
-
-    #[test]
-    fn parses_docker_hub_namespace_image() {
-        let image = ImageRef::parse("username/image:latest").unwrap();
-        assert_eq!(image.registry, "registry-1.docker.io");
-        assert_eq!(image.repository, "username/image");
-        assert_eq!(image.reference, "latest");
-    }
-
-    #[test]
-    fn parses_explicit_registry_tag() {
-        let image = ImageRef::parse("ghcr.io/org/app:1.2.3").unwrap();
-        assert_eq!(image.registry, "ghcr.io");
-        assert_eq!(image.repository, "org/app");
-        assert_eq!(image.reference, "1.2.3");
-    }
-
-    #[test]
-    fn parses_digest_reference() {
-        let image = ImageRef::parse("example.com/org/app@sha256:abc").unwrap();
-        assert_eq!(image.registry, "example.com");
-        assert_eq!(image.repository, "org/app");
-        assert_eq!(image.reference, "sha256:abc");
-    }
 }

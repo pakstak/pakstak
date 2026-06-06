@@ -3,12 +3,12 @@ use anyhow::{Context as _, bail};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-pub fn run(storage: &Storage, alias: &str, command: Vec<String>) -> anyhow::Result<()> {
+pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::Result<()> {
     if command.is_empty() {
         bail!("run command cannot be empty");
     }
 
-    let manifest_digest = storage.read_app_manifest_digest(alias)?;
+    let manifest_digest = storage.read_container_manifest_digest(container)?;
     let manifest = storage.read_manifest(&manifest_digest)?;
 
     let mut bwrap = Command::new("bwrap");

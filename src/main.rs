@@ -2,6 +2,7 @@ mod digest;
 mod fetch;
 mod install;
 mod manifest;
+mod reference;
 mod run;
 mod storage;
 mod update;
@@ -21,21 +22,21 @@ struct Cli {
 enum Command {
     /// Fetch and install an OCI image.
     Install {
-        /// User-provided app alias,
+        /// User-defined container name,
         /// must be unique and only contain ASCII letters, numbers, dots, underscores, and dashes.
-        alias: String,
-        /// Image reference to install, for example alpine:latest or ghcr.io/org/app:tag.
+        container: String,
+        /// Image reference to install, for example alpine:latest or ghcr.io/org/container:tag.
         image: String,
     },
-    /// Update installed apps to their latest manifest and layers.
+    /// Update installed containers to their latest manifest and layers.
     Update {
-        /// Optional installed app aliases to update. If omitted, all apps are updated.
-        aliases: Vec<String>,
+        /// Optional installed containers to update. If omitted, all containers are updated.
+        containers: Vec<String>,
     },
     /// Run a command inside an installed image rootfs.
     Run {
-        /// Installed app alias.
-        alias: String,
+        /// Installed container name.
+        container: String,
         /// Command and arguments that are passed to the Bubblewrap.
         #[arg(required = true, last = true)]
         command: Vec<String>,
@@ -46,17 +47,17 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Install { alias, image } => {
+        Command::Install { container, image } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
-            install::install(&storage, &alias, &image)
+            install::install(&storage, &container, &image)
         }
-        Command::Update { aliases } => {
+        Command::Update { containers } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
-            update::update(&storage, aliases)
+            update::update(&storage, containers)
         }
-        Command::Run { alias, command } => {
+        Command::Run { container, command } => {
             let storage = Storage::new().context("failed to initialize storage")?;
-            run::run(&storage, &alias, command)
+            run::run(&storage, &container, command)
         }
     }
 }

@@ -1,25 +1,25 @@
-use crate::fetch::{AppMetadata, ImageRef, fetch_image, validate_alias};
+use crate::fetch::{fetch_image, validate_container};
+use crate::reference::Reference;
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 
-pub fn install(storage: &StorageMutable, alias: &str, image: &str) -> anyhow::Result<()> {
-    validate_alias(alias)?;
+pub fn install(storage: &StorageMutable, container: &str, image: &str) -> anyhow::Result<()> {
+    validate_container(container)?;
 
-    if storage.is_app_alias_taken(alias) {
-        anyhow::bail!("app alias `{alias}` already exists");
+    if storage.is_container_taken(container) {
+        anyhow::bail!("container `{container}` already exists");
     }
 
-    let image_ref = ImageRef::parse(image)
+    let reference = Reference::parse(image)
         .with_context(|| format!("failed to parse image reference `{image}`"))?;
-    let fetched_manifest = fetch_image(storage, &image_ref)?;
+    let fetched_manifest = fetch_image(storage, &reference)?;
 
-    let metadata = AppMetadata::from_image(image, &image_ref);
     storage
-        .write_app(alias, &fetched_manifest.digest, &metadata)
-        .with_context(|| format!("failed to publish app alias `{alias}`"))?;
+        .write_container(container, &fetched_manifest.digest, &reference)
+        .with_context(|| format!("failed to publish container `{container}`"))?;
 
     eprintln!(
-        "installed {image} as {alias} with manifest {}",
+        "installed {image} as {container} with manifest {}",
         fetched_manifest.digest
     );
 

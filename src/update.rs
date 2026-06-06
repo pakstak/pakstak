@@ -1,49 +1,45 @@
-use crate::fetch::{ImageRef, fetch_image, validate_alias};
+use crate::fetch::{fetch_image, validate_container};
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 use std::collections::HashSet;
 
-pub fn update(storage: &StorageMutable, aliases: Vec<String>) -> anyhow::Result<()> {
-    let mut aliases: HashSet<_> = aliases.into_iter().collect();
+pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Result<()> {
+    let mut containers: HashSet<_> = containers.into_iter().collect();
 
-    for alias in aliases.iter() {
-        validate_alias(alias)?;
+    for container in containers.iter() {
+        validate_container(container)?;
     }
 
-    if aliases.is_empty() {
-        aliases.extend(storage.read_app_aliases()?);
+    if containers.is_empty() {
+        containers.extend(storage.read_containers()?);
     }
 
-    for alias in aliases {
-        if !storage.is_app_alias_taken(&alias) {
+    for container in containers {
+        if !storage.is_container_taken(&container) {
             continue;
         }
 
-        let metadata = storage.read_app_metadata(&alias)?;
-        let image_ref = ImageRef::from_metadata(&metadata);
-        let fetched_manifest = fetch_image(storage, &image_ref).with_context(|| {
-            format!(
-                "failed to update app alias `{alias}` from image {}",
-                metadata.source.image
-            )
+        let reference = storage.read_container_reference(&container)?;
+        let fetched_manifest = fetch_image(storage, &reference).with_context(|| {
+            format!("failed to update container `{container}` from {reference}")
         })?;
 
-        let current_manifest = storage.read_app_manifest_digest(&alias)?;
+        let current_manifest = storage.read_container_manifest_digest(&container)?;
         if current_manifest == fetched_manifest.digest {
             eprintln!(
-                "{alias} is already up to date at {}",
+                "{container} is already up to date at {}",
                 fetched_manifest.digest
             );
             continue;
         }
 
         storage
-            .write_app_manifest_digest(&alias, &fetched_manifest.digest)
+            .write_container_manifest_digest(&container, &fetched_manifest.digest)
             .with_context(|| {
-                format!("failed to publish updated manifest for app alias `{alias}`")
+                format!("failed to publish updated manifest for container `{container}`")
             })?;
         eprintln!(
-            "updated {alias} from {current_manifest} to {}",
+            "updated {container} from {current_manifest} to {}",
             fetched_manifest.digest
         );
     }

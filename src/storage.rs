@@ -1,6 +1,6 @@
 use crate::digest::DigestVerifier;
-use crate::fetch::AppMetadata;
 use crate::manifest::ImageManifest;
+use crate::reference::Reference;
 use anyhow::Context as _;
 use flate2::read::GzDecoder;
 use std::env;
@@ -42,13 +42,20 @@ impl Storage {
         })
     }
 
-    pub fn read_app_manifest_digest(&self, alias: &str) -> anyhow::Result<String> {
-        let manifest_path = self.app_path(alias).join("manifest");
-        let manifest_digest = fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read app manifest {}", manifest_path.display()))?;
+    pub fn read_container_manifest_digest(&self, container: &str) -> anyhow::Result<String> {
+        let manifest_digest_path = self.container_path(container).join("manifest_digest");
+        let manifest_digest = fs::read_to_string(&manifest_digest_path).with_context(|| {
+            format!(
+                "failed to read container manifest digest {}",
+                manifest_digest_path.display()
+            )
+        })?;
         let manifest_digest = manifest_digest.trim().to_string();
         if manifest_digest.is_empty() {
-            anyhow::bail!("app manifest {} is empty", manifest_path.display());
+            anyhow::bail!(
+                "container manifest digest {} is empty",
+                manifest_digest_path.display()
+            );
         }
         Ok(manifest_digest)
     }
@@ -61,33 +68,36 @@ impl Storage {
             .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))
     }
 
-    pub fn read_app_metadata(&self, alias: &str) -> anyhow::Result<AppMetadata> {
-        let metadata_path = self.app_path(alias).join("metadata.json");
-        let metadata = fs::read(&metadata_path)
-            .with_context(|| format!("failed to read metadata {}", metadata_path.display()))?;
-        serde_json::from_slice(&metadata)
-            .with_context(|| format!("failed to parse metadata {}", metadata_path.display()))
+    pub fn read_container_reference(&self, container: &str) -> anyhow::Result<Reference> {
+        let reference_path = self.container_path(container).join("reference.json");
+        let reference = fs::read(&reference_path)
+            .with_context(|| format!("failed to read reference {}", reference_path.display()))?;
+        serde_json::from_slice(&reference)
+            .with_context(|| format!("failed to parse reference {}", reference_path.display()))
     }
 
-    pub fn read_app_aliases(&self) -> anyhow::Result<Vec<String>> {
-        let apps_path = self.apps_path();
-        let mut aliases = Vec::new();
-        for entry in fs::read_dir(&apps_path)
-            .with_context(|| format!("failed to read apps directory {}", apps_path.display()))?
-        {
+    pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
+        let containers_path = self.containers_path();
+        let mut containers = Vec::new();
+        for entry in fs::read_dir(&containers_path).with_context(|| {
+            format!(
+                "failed to read containers directory {}",
+                containers_path.display()
+            )
+        })? {
             let entry = entry.with_context(|| {
                 format!(
-                    "failed to read apps directory entry under {}",
-                    apps_path.display()
+                    "failed to read containers directory entry under {}",
+                    containers_path.display()
                 )
             })?;
-            let alias = entry
+            let container = entry
                 .file_name()
                 .into_string()
-                .map_err(|name| anyhow::anyhow!("app alias {:?} is not valid UTF-8", name))?;
-            aliases.push(alias);
+                .map_err(|name| anyhow::anyhow!("container name {:?} is not valid UTF-8", name))?;
+            containers.push(container);
         }
-        Ok(aliases)
+        Ok(containers)
     }
 
     pub fn get_layer_path(&self, digest: &str) -> Option<PathBuf> {
@@ -95,20 +105,20 @@ impl Storage {
         layer_path.is_dir().then_some(layer_path)
     }
 
-    pub fn is_app_alias_taken(&self, alias: &str) -> bool {
-        self.app_path(alias).is_dir()
+    pub fn is_container_taken(&self, container: &str) -> bool {
+        self.container_path(container).is_dir()
     }
 
     pub fn is_manifest_saved(&self, digest: &str) -> bool {
         self.manifest_path(digest).is_file()
     }
 
-    fn apps_path(&self) -> PathBuf {
-        self.storage_path.join("apps")
+    fn containers_path(&self) -> PathBuf {
+        self.storage_path.join("containers")
     }
 
-    fn app_path(&self, alias: &str) -> PathBuf {
-        self.apps_path().join(alias)
+    fn container_path(&self, container: &str) -> PathBuf {
+        self.containers_path().join(container)
     }
 
     fn manifest_path(&self, digest: &str) -> PathBuf {
@@ -156,24 +166,24 @@ impl StorageMutable {
         Ok(Self { storage })
     }
 
-    pub fn read_app_manifest_digest(&self, alias: &str) -> anyhow::Result<String> {
-        self.storage.read_app_manifest_digest(alias)
+    pub fn read_container_manifest_digest(&self, container: &str) -> anyhow::Result<String> {
+        self.storage.read_container_manifest_digest(container)
     }
 
-    pub fn read_app_metadata(&self, alias: &str) -> anyhow::Result<AppMetadata> {
-        self.storage.read_app_metadata(alias)
+    pub fn read_container_reference(&self, container: &str) -> anyhow::Result<Reference> {
+        self.storage.read_container_reference(container)
     }
 
-    pub fn read_app_aliases(&self) -> anyhow::Result<Vec<String>> {
-        self.storage.read_app_aliases()
+    pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
+        self.storage.read_containers()
     }
 
     pub fn get_layer_path(&self, digest: &str) -> Option<PathBuf> {
         self.storage.get_layer_path(digest)
     }
 
-    pub fn is_app_alias_taken(&self, alias: &str) -> bool {
-        self.storage.is_app_alias_taken(alias)
+    pub fn is_container_taken(&self, container: &str) -> bool {
+        self.storage.is_container_taken(container)
     }
 
     pub fn is_manifest_saved(&self, digest: &str) -> bool {
@@ -186,44 +196,57 @@ impl StorageMutable {
             .with_context(|| format!("failed to write manifest to {}", path.display()))
     }
 
-    pub fn write_app_manifest_digest(&self, alias: &str, digest: &str) -> anyhow::Result<()> {
-        let path = self.storage.app_path(alias).join("manifest");
+    pub fn write_container_manifest_digest(
+        &self,
+        container: &str,
+        digest: &str,
+    ) -> anyhow::Result<()> {
+        let path = self
+            .storage
+            .container_path(container)
+            .join("manifest_digest");
         self.atomic_write(&path, digest.as_bytes())
             .with_context(|| format!("failed to write manifest digest to {}", path.display()))
     }
 
-    pub fn write_app(
+    pub fn write_container(
         &self,
-        alias: &str,
+        container: &str,
         manifest_digest: &str,
-        metadata: &AppMetadata,
+        reference: &Reference,
     ) -> anyhow::Result<()> {
-        let app_path = self.storage.app_path(alias);
-        let temporary_app_path = self.storage.temporary_path_for(&app_path)?;
-        fs::create_dir_all(&temporary_app_path).with_context(|| {
+        let container_path = self.storage.container_path(container);
+        let temporary_container_path = self.storage.temporary_path_for(&container_path)?;
+        fs::create_dir_all(&temporary_container_path).with_context(|| {
             format!(
-                "failed to create temporary app directory {}",
-                temporary_app_path.display()
+                "failed to create temporary container directory {}",
+                temporary_container_path.display()
             )
         })?;
 
-        fs::write(temporary_app_path.join("manifest"), manifest_digest).with_context(|| {
+        fs::write(
+            temporary_container_path.join("manifest_digest"),
+            manifest_digest,
+        )
+        .with_context(|| {
             format!(
-                "failed to write temporary app manifest file in {}",
-                temporary_app_path.display()
+                "failed to write temporary container manifest digest file in {}",
+                temporary_container_path.display()
             )
         })?;
 
-        let metadata =
-            serde_json::to_vec_pretty(metadata).context("failed to serialize app metadata")?;
-        fs::write(temporary_app_path.join("metadata.json"), metadata).with_context(|| {
-            format!(
-                "failed to write temporary app metadata file in {}",
-                temporary_app_path.display()
-            )
-        })?;
+        let reference = serde_json::to_vec_pretty(reference)
+            .context("failed to serialize container reference")?;
+        fs::write(temporary_container_path.join("reference.json"), reference).with_context(
+            || {
+                format!(
+                    "failed to write temporary container reference file in {}",
+                    temporary_container_path.display()
+                )
+            },
+        )?;
 
-        self.publish_directory(&temporary_app_path, &app_path)
+        self.publish_directory(&temporary_container_path, &container_path)
     }
 
     pub fn write_layer(&self, digest: &str, reader: impl Read) -> anyhow::Result<()> {
