@@ -2,81 +2,77 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[derive(PartialEq, Eq, Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Specifier {
+    Digest(String),
+    Tag(String),
+}
+
+impl Specifier {
+    pub fn as_typeless_str(&self) -> &str {
+        match self {
+            Specifier::Digest(s) => s,
+            Specifier::Tag(s) => s,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Reference {
     pub registry: String,
     pub repository: String,
-    pub tag: String,
-    pub digest: Option<String>,
+    pub specifier: Specifier,
 }
 
 impl Reference {
     pub fn parse(input: &str) -> anyhow::Result<Self> {
-        let name = input.split_once('@').map_or(input, |(name, _digest)| name);
-        let name = image_name_without_tag(name);
-        let digest = input
-            .split_once('@')
-            .map(|(_name, digest)| digest.to_string());
+        let (name, digest) = input
+            .rsplit_once('@')
+            .map(|(n, d)| (n, Some(d)))
+            .unwrap_or((input, None));
 
-        let tag = tag_from_input(input).unwrap_or("latest").to_string();
+        let (name, tag) = name
+            .rsplit_once(':')
+            .map(|(n, d)| (n, Some(d)))
+            .unwrap_or((name, None));
+
         let mut parts = name.split('/');
-        let first = parts.next().context("image name is empty")?;
+        let registry = parts.next().context("image name is empty")?.to_owned();
 
-        let (registry, repository) =
-            if first.contains('.') || first.contains(':') || first == "localhost" {
-                let rest = parts.collect::<Vec<_>>().join("/");
-                if rest.is_empty() {
-                    bail!("image repository is missing");
-                }
-                (first.to_string(), rest)
-            } else {
-                bail!("image reference must include an explicit registry")
-            };
+        if !registry.contains('.') && !registry.contains(':') && registry != "localhost" {
+            bail!("image reference must include an explicit registry")
+        }
+
+        let repository = parts.collect::<Vec<_>>().join("/").to_string();
+
+        if repository.is_empty() {
+            bail!("image repository is missing");
+        }
 
         Ok(Self {
             registry,
             repository,
-            tag,
-            digest,
+            specifier: digest
+                .map(|d| Specifier::Digest(d.to_owned()))
+                .unwrap_or_else(|| Specifier::Tag(tag.unwrap_or("latest").to_owned())),
         })
-    }
-
-    pub fn manifest_reference(&self) -> &str {
-        self.digest.as_deref().unwrap_or(&self.tag)
     }
 }
 
 impl fmt::Display for Reference {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{}/{}:{}",
-            self.registry, self.repository, self.tag
-        )?;
-        if let Some(digest) = &self.digest {
-            write!(formatter, "@{digest}")?;
+        write!(formatter, "{}/{}", self.registry, self.repository)?;
+
+        match &self.specifier {
+            Specifier::Digest(digest) => {
+                write!(formatter, "@{digest}")
+            }
+            Specifier::Tag(tag) => {
+                write!(formatter, ":{tag}")
+            }
         }
-        Ok(())
     }
-}
-
-fn image_name_without_tag(input: &str) -> &str {
-    let last_slash = input.rfind('/');
-    let last_colon = input.rfind(':');
-    if let Some(colon) = last_colon
-        && last_slash.is_none_or(|slash| colon > slash)
-    {
-        return &input[..colon];
-    }
-    input
-}
-
-fn tag_from_input(input: &str) -> Option<&str> {
-    let name = input.split_once('@').map_or(input, |(name, _digest)| name);
-    let last_slash = name.rfind('/');
-    let last_colon = name.rfind(':');
-    let colon = last_colon.filter(|colon| last_slash.is_none_or(|slash| *colon > slash))?;
-    Some(&name[colon + 1..])
 }
 
 #[cfg(test)]
@@ -108,9 +104,7 @@ mod tests {
         let image = Reference::parse("ghcr.io/org/container:1.2.3").unwrap();
         assert_eq!(image.registry, "ghcr.io");
         assert_eq!(image.repository, "org/container");
-        assert_eq!(image.tag, "1.2.3");
-        assert_eq!(image.digest, None);
-        assert_eq!(image.manifest_reference(), "1.2.3");
+        assert_eq!(image.specifier, Specifier::Tag("1.2.3".to_owned()));
     }
 
     #[test]
@@ -118,9 +112,7 @@ mod tests {
         let image = Reference::parse("example.com/org/container@sha256:abc").unwrap();
         assert_eq!(image.registry, "example.com");
         assert_eq!(image.repository, "org/container");
-        assert_eq!(image.tag, "latest");
-        assert_eq!(image.digest, Some("sha256:abc".to_string()));
-        assert_eq!(image.manifest_reference(), "sha256:abc");
+        assert_eq!(image.specifier, Specifier::Digest("sha256:abc".to_owned()));
     }
 
     #[test]
@@ -128,9 +120,7 @@ mod tests {
         let image = Reference::parse("example.com/org/container:1.2.3@sha256:abc").unwrap();
         assert_eq!(image.registry, "example.com");
         assert_eq!(image.repository, "org/container");
-        assert_eq!(image.tag, "1.2.3");
-        assert_eq!(image.digest, Some("sha256:abc".to_string()));
-        assert_eq!(image.manifest_reference(), "sha256:abc");
+        assert_eq!(image.specifier, Specifier::Digest("sha256:abc".to_owned()));
     }
 
     #[test]

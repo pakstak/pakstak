@@ -97,7 +97,9 @@ mod tests {
     #[test]
     fn parses_bearer_challenge() {
         let challenge = parse_bearer_challenge(
-            "Bearer realm=\"https://auth.example.test/token\",service=\"registry.example.test\",scope=\"repository:namespace/app:pull,push\"",
+            "Bearer realm=\"https://auth.example.test/token\"\
+            ,service=\"registry.example.test\",scope=\"repository\
+            :namespace/app:pull,push\"",
         )
         .unwrap();
 
