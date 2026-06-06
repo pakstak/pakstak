@@ -1,3 +1,4 @@
+use crate::digest;
 use crate::digest::DigestVerifier;
 use crate::manifest::ImageManifest;
 use crate::reference::Reference;
@@ -62,10 +63,15 @@ impl Storage {
 
     pub fn read_manifest(&self, digest: &str) -> anyhow::Result<ImageManifest> {
         let manifest_path = self.manifest_path(digest);
-        let manifest_bytes = fs::read(&manifest_path)
-            .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
+        let manifest_bytes = self.read_manifest_bytes(digest)?;
         serde_json::from_slice(&manifest_bytes)
             .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))
+    }
+
+    pub fn read_manifest_bytes(&self, digest: &str) -> anyhow::Result<Vec<u8>> {
+        let manifest_path = self.manifest_path(digest);
+        fs::read(&manifest_path)
+            .with_context(|| format!("failed to read manifest {}", manifest_path.display()))
     }
 
     pub fn read_manifest_digests(
@@ -144,8 +150,25 @@ impl Storage {
         self.container_path(container).is_dir()
     }
 
-    pub fn is_manifest_saved(&self, digest: &str) -> bool {
-        self.manifest_path(digest).is_file()
+    pub fn is_manifest_saved(&self, digest: &str, verify: bool) -> anyhow::Result<bool> {
+        let manifest_path = self.manifest_path(digest);
+
+        if !manifest_path.is_file() {
+            return Ok(false);
+        }
+
+        if !verify {
+            return Ok(true);
+        }
+
+        let manifest_bytes = fs::read(&manifest_path)
+            .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
+
+        Ok(digest::verify_bytes(&manifest_bytes, digest)
+            .inspect_err(|_| {
+                eprintln!("manifest {digest} failed digest verification");
+            })
+            .is_ok())
     }
 
     fn containers_path(&self) -> PathBuf {
@@ -225,6 +248,10 @@ impl StorageMutable {
         self.storage.read_manifest(digest)
     }
 
+    pub fn read_manifest_bytes(&self, digest: &str) -> anyhow::Result<Vec<u8>> {
+        self.storage.read_manifest_bytes(digest)
+    }
+
     pub fn read_manifest_digests(
         &self,
     ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
@@ -245,8 +272,8 @@ impl StorageMutable {
         self.storage.is_container_taken(container)
     }
 
-    pub fn is_manifest_saved(&self, digest: &str) -> bool {
-        self.storage.is_manifest_saved(digest)
+    pub fn is_manifest_saved(&self, digest: &str, verify: bool) -> anyhow::Result<bool> {
+        self.storage.is_manifest_saved(digest, verify)
     }
 
     pub fn write_manifest(&self, digest: &str, contents: &[u8]) -> anyhow::Result<()> {

@@ -5,6 +5,7 @@ mod install;
 mod manifest;
 mod prune;
 mod reference;
+mod repair;
 mod run;
 mod storage;
 mod uninstall;
@@ -43,6 +44,8 @@ enum Command {
     },
     /// Remove cached manifests and layers that are not used by installed containers.
     Prune,
+    /// Repair installed containers and check cached manifests and layers.
+    Repair,
     /// Run a command inside an installed image rootfs.
     Run {
         /// Installed container name.
@@ -72,6 +75,10 @@ fn main() -> anyhow::Result<()> {
         Command::Prune => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
             prune::prune(&storage)
+        }
+        Command::Repair => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            repair::repair(&storage)
         }
         Command::Run { container, command } => {
             let storage = Storage::new().context("failed to initialize storage")?;

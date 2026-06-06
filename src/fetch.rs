@@ -245,6 +245,7 @@ pub fn validate_container(container: &str) -> anyhow::Result<()> {
 pub fn fetch_image(
     storage: &StorageMutable,
     reference: &Reference,
+    repair: bool,
 ) -> anyhow::Result<FetchedManifest> {
     let mut client = RegistryClient::new(reference.registry.clone(), reference.repository.clone())
         .with_context(|| format!("failed to initialize registry client for {reference}"))?;
@@ -252,14 +253,20 @@ pub fn fetch_image(
         .fetch_image_manifest(&reference.specifier)
         .with_context(|| format!("failed to fetch manifest for {reference}"))?;
 
-    if storage.is_manifest_saved(&fetched_manifest.digest) {
+    let is_manifest_saved = storage
+        .is_manifest_saved(&fetched_manifest.digest, repair)
+        .with_context(|| format!("failed to verify manifest for {}", &fetched_manifest.digest))?;
+
+    if is_manifest_saved && !repair {
         eprintln!("manifest {} is already installed", fetched_manifest.digest);
         return Ok(fetched_manifest);
     }
 
     fetch_layers(storage, &mut client, &fetched_manifest)?;
 
-    storage.write_manifest(&fetched_manifest.digest, &fetched_manifest.bytes)?;
+    if !is_manifest_saved {
+        storage.write_manifest(&fetched_manifest.digest, &fetched_manifest.bytes)?;
+    }
 
     Ok(fetched_manifest)
 }

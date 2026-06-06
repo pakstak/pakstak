@@ -22,7 +22,7 @@ pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Resu
         }
 
         let reference = storage.read_container_reference(&container)?;
-        let fetched_manifest = fetch_image(storage, &reference).with_context(|| {
+        let fetched_manifest = fetch_image(storage, &reference, false).with_context(|| {
             format!("failed to update container `{container}` from {reference}")
         })?;
 

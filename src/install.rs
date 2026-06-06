@@ -12,7 +12,7 @@ pub fn install(storage: &StorageMutable, container: &str, image: &str) -> anyhow
 
     let reference = Reference::parse(image)
         .with_context(|| format!("failed to parse image reference `{image}`"))?;
-    let fetched_manifest = fetch_image(storage, &reference)?;
+    let fetched_manifest = fetch_image(storage, &reference, false)?;
 
     storage
         .write_container(container, &fetched_manifest.digest, &reference)
