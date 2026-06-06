@@ -68,6 +68,43 @@ impl Storage {
             .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))
     }
 
+    pub fn read_manifest_digests(&self) -> anyhow::Result<Vec<String>> {
+        let manifests_path = self.manifests_path();
+        let mut manifests = Vec::new();
+        for entry in read_dir_entries(&manifests_path, "manifests")? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name().into_string().map_err(|name| {
+                anyhow::anyhow!("manifest file name {:?} is not valid UTF-8", name)
+            })?;
+            let digest = file_name.strip_suffix(".json").with_context(|| {
+                format!("manifest file {} does not end with .json", path.display())
+            })?;
+            manifests.push(digest.to_string());
+        }
+        Ok(manifests)
+    }
+
+    pub fn read_layer_digests(&self) -> anyhow::Result<Vec<String>> {
+        let layers_path = self.layers_path();
+        let mut layers = Vec::new();
+        for entry in read_dir_entries(&layers_path, "layers")? {
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            let layer = entry
+                .file_name()
+                .into_string()
+                .map_err(|name| anyhow::anyhow!("layer name {:?} is not valid UTF-8", name))?;
+            layers.push(layer);
+        }
+        Ok(layers)
+    }
+
     pub fn read_container_reference(&self, container: &str) -> anyhow::Result<Reference> {
         let reference_path = self.container_path(container).join("reference.json");
         let reference = fs::read(&reference_path)
@@ -79,18 +116,11 @@ impl Storage {
     pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
         let containers_path = self.containers_path();
         let mut containers = Vec::new();
-        for entry in fs::read_dir(&containers_path).with_context(|| {
-            format!(
-                "failed to read containers directory {}",
-                containers_path.display()
-            )
-        })? {
-            let entry = entry.with_context(|| {
-                format!(
-                    "failed to read containers directory entry under {}",
-                    containers_path.display()
-                )
-            })?;
+        for entry in read_dir_entries(&containers_path, "containers")? {
+            if !entry.path().is_dir() {
+                continue;
+            }
+
             let container = entry
                 .file_name()
                 .into_string()
@@ -121,14 +151,20 @@ impl Storage {
         self.containers_path().join(container)
     }
 
+    fn manifests_path(&self) -> PathBuf {
+        self.storage_path.join("manifests")
+    }
+
     fn manifest_path(&self, digest: &str) -> PathBuf {
-        self.storage_path
-            .join("manifests")
-            .join(format!("{digest}.json"))
+        self.manifests_path().join(format!("{digest}.json"))
+    }
+
+    fn layers_path(&self) -> PathBuf {
+        self.storage_path.join("layers")
     }
 
     fn layer_path(&self, digest: &str) -> PathBuf {
-        self.storage_path.join("layers").join(digest)
+        self.layers_path().join(digest)
     }
 
     fn temporary_path_for(&self, output_path: &Path) -> anyhow::Result<PathBuf> {
@@ -176,6 +212,18 @@ impl StorageMutable {
 
     pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
         self.storage.read_containers()
+    }
+
+    pub fn read_manifest(&self, digest: &str) -> anyhow::Result<ImageManifest> {
+        self.storage.read_manifest(digest)
+    }
+
+    pub fn read_manifest_digests(&self) -> anyhow::Result<Vec<String>> {
+        self.storage.read_manifest_digests()
+    }
+
+    pub fn read_layer_digests(&self) -> anyhow::Result<Vec<String>> {
+        self.storage.read_layer_digests()
     }
 
     pub fn get_layer_path(&self, digest: &str) -> Option<PathBuf> {
@@ -255,20 +303,19 @@ impl StorageMutable {
             anyhow::bail!("container `{container}` is not installed");
         }
 
-        let temporary_container_path = self.storage.temporary_path_for(&container_path)?;
-        fs::rename(&container_path, &temporary_container_path).with_context(|| {
-            format!(
-                "failed to move container directory {} to temporary path {}",
-                container_path.display(),
-                temporary_container_path.display()
-            )
-        })?;
-        fs::remove_dir_all(&temporary_container_path).with_context(|| {
-            format!(
-                "failed to remove temporary container directory {}",
-                temporary_container_path.display()
-            )
-        })
+        self.remove_directory(&container_path, "container")
+    }
+
+    pub fn remove_manifest(&self, digest: &str) -> anyhow::Result<()> {
+        let manifest_path = self.storage.manifest_path(digest);
+        self.remove_file(&manifest_path, "manifest")
+            .with_context(|| format!("failed to remove manifest {digest}"))
+    }
+
+    pub fn remove_layer(&self, digest: &str) -> anyhow::Result<()> {
+        let layer_path = self.storage.layer_path(digest);
+        self.remove_directory(&layer_path, "layer")
+            .with_context(|| format!("failed to remove layer {digest}"))
     }
 
     pub fn write_layer(&self, digest: &str, reader: impl Read) -> anyhow::Result<()> {
@@ -333,6 +380,80 @@ impl StorageMutable {
             )
         })
     }
+
+    fn remove_file(&self, path: &Path, kind: &str) -> anyhow::Result<()> {
+        let temporary_path = self.storage.temporary_path_for(path)?;
+        if temporary_path.exists() {
+            fs::remove_file(&temporary_path).with_context(|| {
+                format!(
+                    "failed to clear temporary {kind} file {}",
+                    temporary_path.display()
+                )
+            })?;
+        }
+
+        fs::rename(path, &temporary_path).with_context(|| {
+            format!(
+                "failed to move {kind} file {} to temporary path {}",
+                path.display(),
+                temporary_path.display()
+            )
+        })?;
+        fs::remove_file(&temporary_path).with_context(|| {
+            format!(
+                "failed to remove temporary {kind} file {}",
+                temporary_path.display()
+            )
+        })
+    }
+
+    fn remove_directory(&self, path: &Path, kind: &str) -> anyhow::Result<()> {
+        let temporary_path = self.storage.temporary_path_for(path)?;
+        if temporary_path.exists() {
+            fs::remove_dir_all(&temporary_path).with_context(|| {
+                format!(
+                    "failed to clear temporary {kind} directory {}",
+                    temporary_path.display()
+                )
+            })?;
+        }
+
+        fs::rename(path, &temporary_path).with_context(|| {
+            format!(
+                "failed to move {kind} directory {} to temporary path {}",
+                path.display(),
+                temporary_path.display()
+            )
+        })?;
+        fs::remove_dir_all(&temporary_path).with_context(|| {
+            format!(
+                "failed to remove temporary {kind} directory {}",
+                temporary_path.display()
+            )
+        })
+    }
+}
+
+fn read_dir_entries(path: &Path, kind: &str) -> anyhow::Result<Vec<fs::DirEntry>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read {kind} directory {}", path.display()));
+        }
+    };
+
+    entries
+        .map(|entry| {
+            entry.with_context(|| {
+                format!(
+                    "failed to read {kind} directory entry under {}",
+                    path.display()
+                )
+            })
+        })
+        .collect()
 }
 
 fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {

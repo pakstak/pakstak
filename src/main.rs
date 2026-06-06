@@ -3,6 +3,7 @@ mod digest;
 mod fetch;
 mod install;
 mod manifest;
+mod prune;
 mod reference;
 mod run;
 mod storage;
@@ -40,6 +41,8 @@ enum Command {
         /// Optional installed containers to update. If omitted, all containers are updated.
         containers: Vec<String>,
     },
+    /// Remove cached manifests and layers that are not used by installed containers.
+    Prune,
     /// Run a command inside an installed image rootfs.
     Run {
         /// Installed container name.
@@ -65,6 +68,10 @@ fn main() -> anyhow::Result<()> {
         Command::Update { containers } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
             update::update(&storage, containers)
+        }
+        Command::Prune => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            prune::prune(&storage)
         }
         Command::Run { container, command } => {
             let storage = Storage::new().context("failed to initialize storage")?;
