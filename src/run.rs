@@ -9,6 +9,8 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
         bail!("run command cannot be empty");
     }
 
+    storage.ensure_container_installed(container)?;
+
     let manifest_digest = storage.read_container_manifest_digest(container)?;
     let manifest = storage.read_manifest(&manifest_digest)?;
 

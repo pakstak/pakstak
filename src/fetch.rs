@@ -223,25 +223,6 @@ impl ManifestMediaType {
     }
 }
 
-pub fn validate_container(container: &str) -> anyhow::Result<()> {
-    if container.is_empty() {
-        bail!("container name cannot be empty");
-    }
-    if container == "." || container == ".." {
-        bail!("container name `{container}` is not allowed");
-    }
-    if !container
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        bail!(
-            "container name `{container}` contains invalid characters; use only ASCII letters, numbers, dots, underscores, and dashes"
-        );
-    }
-
-    Ok(())
-}
-
 pub fn fetch_image(
     storage: &StorageMutable,
     reference: &Reference,

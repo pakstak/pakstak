@@ -158,6 +158,14 @@ impl Storage {
         self.container_path(container).is_dir()
     }
 
+    pub fn ensure_container_installed(&self, container: &str) -> anyhow::Result<()> {
+        if !self.container_path(container).is_dir() {
+            anyhow::bail!("container {container} not installed");
+        }
+
+        Ok(())
+    }
+
     pub fn is_manifest_saved(&self, digest: &str, verify: bool) -> anyhow::Result<bool> {
         let manifest_path = self.manifest_path(digest);
 
@@ -280,6 +288,10 @@ impl StorageMutable {
         self.storage.is_container_taken(container)
     }
 
+    pub fn ensure_container_installed(&self, container: &str) -> anyhow::Result<()> {
+        self.storage.ensure_container_installed(container)
+    }
+
     pub fn is_manifest_saved(&self, digest: &str, verify: bool) -> anyhow::Result<bool> {
         self.storage.is_manifest_saved(digest, verify)
     }
@@ -344,10 +356,8 @@ impl StorageMutable {
     }
 
     pub fn remove_container(&self, container: &str) -> anyhow::Result<()> {
+        self.ensure_container_installed(container)?;
         let container_path = self.storage.container_path(container);
-        if !container_path.is_dir() {
-            anyhow::bail!("container `{container}` is not installed");
-        }
 
         self.remove_directory(&container_path, "container")
     }

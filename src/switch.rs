@@ -1,10 +1,10 @@
-use crate::fetch::{fetch_image, validate_container};
+use crate::fetch::fetch_image;
 use crate::reference::Specifier;
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 
 pub fn switch(storage: &StorageMutable, container: &str, digest: &str) -> anyhow::Result<()> {
-    validate_container(container)?;
+    storage.ensure_container_installed(container)?;
 
     let mut reference = storage
         .read_container_reference(container)

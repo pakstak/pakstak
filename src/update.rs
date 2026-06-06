@@ -1,14 +1,10 @@
-use crate::fetch::{fetch_image, validate_container};
+use crate::fetch::fetch_image;
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 use std::collections::HashSet;
 
 pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Result<()> {
     let mut containers: HashSet<_> = containers.into_iter().collect();
-
-    for container in containers.iter() {
-        validate_container(container)?;
-    }
 
     if containers.is_empty() {
         for container in storage.read_containers()? {
@@ -17,9 +13,7 @@ pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Resu
     }
 
     for container in containers {
-        if !storage.is_container_taken(&container) {
-            continue;
-        }
+        storage.ensure_container_installed(&container)?;
 
         let reference = storage.read_container_reference(&container)?;
         let fetched_manifest = fetch_image(storage, &reference, false).with_context(|| {

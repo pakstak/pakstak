@@ -28,7 +28,8 @@ enum Command {
     /// Fetch and install an OCI image.
     Install {
         /// User-defined container name,
-        /// must be unique and only contain ASCII letters, numbers, dots, underscores, and dashes.
+        /// must be unique, start with an ASCII letter or number, and only contain ASCII letters,
+        /// numbers, dots, underscores, and dashes.
         container: String,
         /// Image reference to install, for example ghcr.io/org/container:tag.
         image: String,
