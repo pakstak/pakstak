@@ -1,4 +1,4 @@
-use crate::context::Context;
+use crate::context::{Context, LockMode};
 use crate::manifest::ImageManifest;
 use anyhow::{Context as _, bail};
 use std::fs;
@@ -6,6 +6,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 pub fn run(ctx: &Context, manifest_hash: &str, command: Vec<String>) -> anyhow::Result<()> {
+    let _lock = ctx.acquire_lock(LockMode::Shared)?;
+
     if command.is_empty() {
         bail!("run command cannot be empty");
     }

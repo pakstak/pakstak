@@ -1,4 +1,4 @@
-use crate::context::Context;
+use crate::context::{Context, LockMode};
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
 use anyhow::{Context as _, anyhow, bail};
 use flate2::read::GzDecoder;
@@ -26,6 +26,8 @@ struct ImageRef {
 }
 
 pub fn install(ctx: &Context, image: &str) -> anyhow::Result<()> {
+    let _lock = ctx.acquire_lock(LockMode::Exclusive)?;
+
     let image_ref = ImageRef::parse(image)
         .with_context(|| format!("failed to parse image reference `{image}`"))?;
     let client = RegistryClient::new(image_ref.registry.clone(), image_ref.repository.clone())
@@ -76,20 +78,29 @@ pub fn install(ctx: &Context, image: &str) -> anyhow::Result<()> {
             continue;
         }
 
-        fs::create_dir_all(&output_dir).with_context(|| {
+        let temporary_output_dir = ctx.temporary_directory_for(&output_dir)?;
+        fs::create_dir_all(&temporary_output_dir).with_context(|| {
             format!(
-                "failed to create layer output directory {}",
-                output_dir.display()
+                "failed to create temporary layer output directory {}",
+                temporary_output_dir.display()
             )
         })?;
         match client.fetch_blob_reader(&layer.digest) {
             Ok(reader) => {
-                extract_layer(reader, &output_dir)
+                extract_layer(reader, &temporary_output_dir)
                     .with_context(|| format!("failed to extract layer {}", layer.digest))?;
+                ctx.publish_directory(&temporary_output_dir, &output_dir)
+                    .with_context(|| {
+                        format!(
+                            "failed to publish layer {} to {}",
+                            layer.digest,
+                            output_dir.display()
+                        )
+                    })?;
                 eprintln!("extracted {} to {}", layer.digest, output_dir.display());
             }
             Err(err) => {
-                let _ = fs::remove_dir_all(&output_dir);
+                let _ = fs::remove_dir_all(&temporary_output_dir);
                 return Err(err).with_context(|| format!("failed to fetch layer {}", layer.digest));
             }
         }
@@ -306,7 +317,7 @@ fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::R
             .unwrap_or(&fetched_manifest.digest)
     ));
 
-    fs::write(&output_path, &fetched_manifest.bytes)
+    ctx.atomic_write(&output_path, &fetched_manifest.bytes)
         .with_context(|| format!("failed to write manifest to {}", output_path.display()))
 }
 
