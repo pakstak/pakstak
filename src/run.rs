@@ -1,3 +1,4 @@
+use crate::manifest::Descriptor;
 use crate::storage::Storage;
 use anyhow::{Context as _, bail};
 use std::os::unix::process::CommandExt;
@@ -12,39 +13,38 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
     let manifest = storage.read_manifest(&manifest_digest)?;
 
     let mut bwrap = Command::new("bwrap");
+
+    bwrap.arg("--clearenv").arg("--unshare-all");
+
+    let get_layer_path = |layer: &Descriptor| {
+        storage
+            .get_layer_path(&layer.digest)
+            .with_context(|| format!("layer {} is missing; install the image first", layer.digest))
+    };
+
+    match manifest.layers.len() {
+        0 => bail!("manifest does not contain any layers"),
+        1 => {
+            bwrap
+                .arg("--ro-bind")
+                .arg(get_layer_path(&manifest.layers[0])?)
+                .arg("/");
+        }
+        _ => {
+            for layer in manifest.layers {
+                bwrap.arg("--overlay-src").arg(get_layer_path(&layer)?);
+            }
+            bwrap.arg("--ro-overlay").arg("/");
+        }
+    }
+
     bwrap
-        .arg("--clearenv")
-        .arg("--unshare-all")
-        .arg("--share-net")
         .arg("--proc")
         .arg("/proc")
         .arg("--dev")
         .arg("/dev")
         .arg("--tmpfs")
         .arg("/tmp");
-
-    let layer_paths = manifest
-        .layers
-        .iter()
-        .map(|layer| {
-            storage.get_layer_path(&layer.digest).with_context(|| {
-                format!("layer {} is missing; install the image first", layer.digest)
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    match layer_paths.as_slice() {
-        [] => bail!("manifest does not contain any layers"),
-        [layer_path] => {
-            bwrap.arg("--ro-bind").arg(layer_path).arg("/");
-        }
-        layer_paths => {
-            for layer_path in layer_paths {
-                bwrap.arg("--overlay-src").arg(layer_path);
-            }
-            bwrap.arg("--ro-overlay").arg("/");
-        }
-    }
 
     bwrap.args(command);
 
