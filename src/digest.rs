@@ -101,6 +101,11 @@ pub fn verify_bytes(bytes: &[u8], expected_digest: &str) -> Result<(), DigestErr
     verifier.verify().map_err(DigestError::from)
 }
 
+pub fn sha256_digest(bytes: &[u8]) -> String {
+    let digest = digest::digest(&digest::SHA256, bytes);
+    format!("sha256:{}", encode_hex(digest.as_ref()))
+}
+
 fn algorithm(name: &str) -> Option<&'static digest::Algorithm> {
     match name {
         "sha256" => Some(&digest::SHA256),

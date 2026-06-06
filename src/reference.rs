@@ -30,12 +30,7 @@ impl Reference {
                 }
                 (first.to_string(), rest)
             } else {
-                let repository = if name.contains('/') {
-                    name.to_string()
-                } else {
-                    format!("library/{name}")
-                };
-                ("registry-1.docker.io".to_string(), repository)
+                bail!("image reference must include an explicit registry")
             };
 
         Ok(Self {
@@ -89,23 +84,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_default_docker_library_image() {
-        let image = Reference::parse("alpine").unwrap();
-        assert_eq!(image.registry, "registry-1.docker.io");
-        assert_eq!(image.repository, "library/alpine");
-        assert_eq!(image.tag, "latest");
-        assert_eq!(image.digest, None);
-        assert_eq!(image.manifest_reference(), "latest");
+    fn rejects_reference_without_registry() {
+        let error = Reference::parse("image").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("image reference must include an explicit registry")
+        );
     }
 
     #[test]
-    fn parses_docker_hub_namespace_image() {
-        let image = Reference::parse("username/image:latest").unwrap();
-        assert_eq!(image.registry, "registry-1.docker.io");
-        assert_eq!(image.repository, "username/image");
-        assert_eq!(image.tag, "latest");
-        assert_eq!(image.digest, None);
-        assert_eq!(image.manifest_reference(), "latest");
+    fn rejects_namespace_reference_without_registry() {
+        let error = Reference::parse("username/image:latest").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("image reference must include an explicit registry")
+        );
     }
 
     #[test]

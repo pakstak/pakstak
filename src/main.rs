@@ -1,3 +1,4 @@
+mod auth;
 mod digest;
 mod fetch;
 mod install;
@@ -25,7 +26,7 @@ enum Command {
         /// User-defined container name,
         /// must be unique and only contain ASCII letters, numbers, dots, underscores, and dashes.
         container: String,
-        /// Image reference to install, for example alpine:latest or ghcr.io/org/container:tag.
+        /// Image reference to install, for example ghcr.io/org/container:tag.
         image: String,
     },
     /// Update installed containers to their latest manifest and layers.

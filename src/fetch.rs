@@ -1,20 +1,14 @@
+use crate::auth;
 use crate::digest;
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
 use crate::reference::Reference;
 use crate::storage::StorageMutable;
-use anyhow::{Context as _, anyhow, bail};
-use serde::Deserialize;
+use anyhow::{Context as _, bail};
 use std::io::{BufReader, Read};
 
-const DOCKER_AUTH: &str = "https://auth.docker.io/token";
-const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
-const LAYER_ACCEPT: &str = "application/vnd.oci.image.layer.v1.tar+gzip, application/vnd.docker.image.rootfs.diff.tar.gzip, application/octet-stream";
-
-#[derive(Debug, Deserialize)]
-struct AuthToken {
-    token: Option<String>,
-    access_token: Option<String>,
-}
+const MANIFEST_ACCEPT: &str =
+    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json";
+const LAYER_ACCEPT: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 
 pub struct RegistryClient {
     registry: String,
@@ -30,24 +24,15 @@ struct ManifestBytes {
 
 impl RegistryClient {
     pub fn new(registry: String, repository: String) -> anyhow::Result<Self> {
-        let token =
-            if registry == "registry-1.docker.io" {
-                Some(fetch_docker_token(&repository).with_context(|| {
-                    format!("failed to fetch Docker Hub token for {repository}")
-                })?)
-            } else {
-                None
-            };
-
         Ok(Self {
             registry,
             repository,
-            token,
+            token: None,
             agent: ureq::AgentBuilder::new().build(),
         })
     }
 
-    pub fn fetch_image_manifest(&self, reference: &str) -> anyhow::Result<FetchedManifest> {
+    pub fn fetch_image_manifest(&mut self, reference: &str) -> anyhow::Result<FetchedManifest> {
         let fetched = self
             .fetch_manifest_bytes(reference)
             .with_context(|| format!("failed to fetch manifest bytes for `{reference}`"))?;
@@ -82,7 +67,7 @@ impl RegistryClient {
             .or_else(|| index.manifests.first())
             .context("manifest index does not contain any manifests")?;
 
-        // Otherwise the initial reference is an image index / manifest list;
+        // Otherwise the initial reference is an image index;
         // fetch the selected platform manifest by digest before fetching layers.
         let fetched = self
             .fetch_manifest_bytes(&descriptor.digest)
@@ -106,38 +91,63 @@ impl RegistryClient {
         })
     }
 
-    fn fetch_manifest_bytes(&self, reference: &str) -> anyhow::Result<ManifestBytes> {
+    fn fetch_manifest_bytes(&mut self, reference: &str) -> anyhow::Result<ManifestBytes> {
         let url = format!(
             "https://{}/v2/{}/manifests/{}",
             self.registry, self.repository, reference
         );
         let response = self
-            .request("GET", &url)
-            .set("Accept", MANIFEST_ACCEPT)
-            .call()
+            .call_with_auth_retry("GET", &url, |request| {
+                request.set("Accept", MANIFEST_ACCEPT)
+            })
             .with_context(|| format!("registry request failed: GET {url}"))?;
 
-        let digest = response.header("Docker-Content-Digest").map(str::to_string);
         let mut bytes = Vec::new();
         response
             .into_reader()
             .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read manifest response body from {url}"))?;
+        let digest = Some(digest::sha256_digest(&bytes));
         Ok(ManifestBytes { bytes, digest })
     }
 
-    fn fetch_blob_reader(&self, digest: &str) -> anyhow::Result<Box<dyn Read>> {
+    fn fetch_blob_reader(&mut self, digest: &str) -> anyhow::Result<Box<dyn Read>> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
             self.registry, self.repository, digest
         );
         let response = self
-            .request("GET", &url)
-            .set("Accept", LAYER_ACCEPT)
-            .call()
+            .call_with_auth_retry("GET", &url, |request| request.set("Accept", LAYER_ACCEPT))
             .with_context(|| format!("registry request failed: GET {url}"))?;
 
         Ok(Box::new(BufReader::new(response.into_reader())))
+    }
+
+    fn call_with_auth_retry<F>(
+        &mut self,
+        method: &str,
+        url: &str,
+        configure: F,
+    ) -> anyhow::Result<ureq::Response>
+    where
+        F: Fn(ureq::Request) -> ureq::Request,
+    {
+        match configure(self.request(method, url)).call() {
+            Ok(response) => Ok(response),
+            Err(ureq::Error::Status(401, response)) => {
+                let token =
+                    auth::token_from_unauthorized(&self.agent, &response).with_context(|| {
+                        format!("failed to authenticate registry request: {method} {url}")
+                    })?;
+                self.token = Some(token);
+                configure(self.request(method, url))
+                    .call()
+                    .with_context(|| {
+                        format!("authenticated registry request failed: {method} {url}")
+                    })
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn request(&self, method: &str, url: &str) -> ureq::Request {
@@ -172,7 +182,7 @@ pub fn fetch_image(
     storage: &StorageMutable,
     reference: &Reference,
 ) -> anyhow::Result<FetchedManifest> {
-    let client = RegistryClient::new(reference.registry.clone(), reference.repository.clone())
+    let mut client = RegistryClient::new(reference.registry.clone(), reference.repository.clone())
         .with_context(|| format!("failed to initialize registry client for {reference}"))?;
     let fetched_manifest = client
         .fetch_image_manifest(reference.manifest_reference())
@@ -191,30 +201,16 @@ pub fn fetch_image(
         return Ok(fetched_manifest);
     }
 
-    fetch_layers(storage, &client, &fetched_manifest)?;
+    fetch_layers(storage, &mut client, &fetched_manifest)?;
 
     storage.write_manifest(&fetched_manifest.digest, &fetched_manifest.bytes)?;
 
     Ok(fetched_manifest)
 }
 
-fn fetch_docker_token(repository: &str) -> anyhow::Result<String> {
-    let url =
-        format!("{DOCKER_AUTH}?service=registry.docker.io&scope=repository:{repository}:pull");
-    let token: AuthToken = ureq::get(&url)
-        .call()
-        .with_context(|| format!("Docker auth request failed: GET {url}"))?
-        .into_json()
-        .context("failed to parse Docker auth token response")?;
-    token
-        .token
-        .or(token.access_token)
-        .ok_or_else(|| anyhow!("Docker auth response did not include a token"))
-}
-
 fn fetch_layers(
     storage: &StorageMutable,
-    client: &RegistryClient,
+    client: &mut RegistryClient,
     fetched_manifest: &FetchedManifest,
 ) -> anyhow::Result<()> {
     eprintln!(
