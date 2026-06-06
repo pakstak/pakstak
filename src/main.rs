@@ -6,6 +6,7 @@ mod manifest;
 mod reference;
 mod run;
 mod storage;
+mod uninstall;
 mod update;
 
 use anyhow::Context as _;
@@ -29,6 +30,11 @@ enum Command {
         /// Image reference to install, for example ghcr.io/org/container:tag.
         image: String,
     },
+    /// Remove an installed container without deleting cached layers or manifests.
+    Uninstall {
+        /// Installed container name.
+        container: String,
+    },
     /// Update installed containers to their latest manifest and layers.
     Update {
         /// Optional installed containers to update. If omitted, all containers are updated.
@@ -51,6 +57,10 @@ fn main() -> anyhow::Result<()> {
         Command::Install { container, image } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
             install::install(&storage, &container, &image)
+        }
+        Command::Uninstall { container } => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            uninstall::uninstall(&storage, &container)
         }
         Command::Update { containers } => {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;

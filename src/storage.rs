@@ -249,6 +249,28 @@ impl StorageMutable {
         self.publish_directory(&temporary_container_path, &container_path)
     }
 
+    pub fn remove_container(&self, container: &str) -> anyhow::Result<()> {
+        let container_path = self.storage.container_path(container);
+        if !container_path.is_dir() {
+            anyhow::bail!("container `{container}` is not installed");
+        }
+
+        let temporary_container_path = self.storage.temporary_path_for(&container_path)?;
+        fs::rename(&container_path, &temporary_container_path).with_context(|| {
+            format!(
+                "failed to move container directory {} to temporary path {}",
+                container_path.display(),
+                temporary_container_path.display()
+            )
+        })?;
+        fs::remove_dir_all(&temporary_container_path).with_context(|| {
+            format!(
+                "failed to remove temporary container directory {}",
+                temporary_container_path.display()
+            )
+        })
+    }
+
     pub fn write_layer(&self, digest: &str, reader: impl Read) -> anyhow::Result<()> {
         let output_path = self.storage.layer_path(digest);
         let temporary_output_path = self.storage.temporary_path_for(&output_path)?;

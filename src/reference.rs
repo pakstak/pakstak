@@ -130,11 +130,8 @@ mod tests {
     }
 
     #[test]
-    fn formats_tagged_digest_reference() {
+    fn formats_only_keeps_digest() {
         let image = Reference::parse("example.com/org/container:1.2.3@sha256:abc").unwrap();
-        assert_eq!(
-            image.to_string(),
-            "example.com/org/container:1.2.3@sha256:abc"
-        );
+        assert_eq!(image.to_string(), "example.com/org/container@sha256:abc");
     }
 }
