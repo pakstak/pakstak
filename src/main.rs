@@ -1,7 +1,9 @@
 mod context;
+mod fetch;
 mod install;
 mod manifest;
 mod run;
+mod update;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
@@ -24,6 +26,11 @@ enum Command {
         /// Image reference to install, for example alpine:latest or ghcr.io/org/app:tag.
         image: String,
     },
+    /// Update installed apps to their latest manifest and layers.
+    Update {
+        /// Optional installed app aliases to update. If omitted, all apps are updated.
+        aliases: Vec<String>,
+    },
     /// Run a command inside an installed image rootfs.
     Run {
         /// Installed app alias.
@@ -40,6 +47,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Install { alias, image } => install::install(&ctx, &alias, &image),
+        Command::Update { aliases } => update::update(&ctx, aliases),
         Command::Run { alias, command } => run::run(&ctx, &alias, command),
     }
 }
