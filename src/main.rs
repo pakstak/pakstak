@@ -1,4 +1,5 @@
 mod context;
+mod digest;
 mod fetch;
 mod install;
 mod manifest;

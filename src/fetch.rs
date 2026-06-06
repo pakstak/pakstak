@@ -1,10 +1,11 @@
 use crate::context::Context;
+use crate::digest::{self, DigestVerifier};
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
 use anyhow::{Context as _, anyhow, bail};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use tar::Archive;
 
@@ -161,12 +162,21 @@ impl RegistryClient {
         let fetched = self
             .fetch_manifest_bytes(reference)
             .with_context(|| format!("failed to fetch manifest bytes for `{reference}`"))?;
+        let requested_digest = reference.contains(':').then_some(reference);
+        if let Some(digest) = requested_digest.or(fetched.digest.as_deref()) {
+            digest::verify_bytes(&fetched.bytes, digest)
+                .with_context(|| format!("failed to verify manifest digest {digest}"))?;
+        }
+        // The initial reference may already point to a platform-specific image manifest.
         if let Ok(manifest) = serde_json::from_slice::<ImageManifest>(&fetched.bytes)
             && manifest.schema_version == 2
         {
-            let digest = fetched.digest.with_context(|| {
-                format!("registry did not provide manifest digest for `{reference}`")
-            })?;
+            let digest = fetched
+                .digest
+                .or_else(|| requested_digest.map(str::to_string))
+                .with_context(|| {
+                    format!("registry did not provide manifest digest for `{reference}`")
+                })?;
             return Ok(FetchedManifest {
                 manifest,
                 bytes: fetched.bytes,
@@ -183,9 +193,17 @@ impl RegistryClient {
             .or_else(|| index.manifests.first())
             .context("manifest index does not contain any manifests")?;
 
+        // Otherwise the initial reference is an image index / manifest list;
+        // fetch the selected platform manifest by digest before fetching layers.
         let fetched = self
             .fetch_manifest_bytes(&descriptor.digest)
             .with_context(|| format!("failed to fetch platform manifest {}", descriptor.digest))?;
+        digest::verify_bytes(&fetched.bytes, &descriptor.digest).with_context(|| {
+            format!(
+                "failed to verify platform manifest digest {}",
+                descriptor.digest
+            )
+        })?;
         let manifest: ImageManifest = serde_json::from_slice(&fetched.bytes)
             .with_context(|| format!("failed to parse image manifest {}", descriptor.digest))?;
         if manifest.schema_version != 2 {
@@ -320,15 +338,10 @@ fn fetch_docker_token(repository: &str) -> anyhow::Result<String> {
 }
 
 fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::Result<String> {
-    let output_dir = ctx.storage_path.join("manifests");
-    fs::create_dir_all(&output_dir).with_context(|| {
-        format!(
-            "failed to create manifests directory {}",
-            output_dir.display()
-        )
-    })?;
-
-    let output_path = output_dir.join(format!("{}.json", fetched_manifest.digest));
+    let output_path = ctx
+        .storage_path
+        .join("manifests")
+        .join(format!("{}.json", fetched_manifest.digest));
 
     ctx.atomic_write(&output_path, &fetched_manifest.bytes)
         .with_context(|| format!("failed to write manifest to {}", output_path.display()))?;
@@ -367,7 +380,7 @@ fn fetch_layers(
         })?;
         match client.fetch_blob_reader(&layer.digest) {
             Ok(reader) => {
-                extract_layer(reader, &temporary_output_dir)
+                extract_layer(reader, &layer.digest, &temporary_output_dir)
                     .with_context(|| format!("failed to extract layer {}", layer.digest))?;
                 ctx.publish_directory(&temporary_output_dir, &output_dir)
                     .with_context(|| {
@@ -389,23 +402,42 @@ fn fetch_layers(
     Ok(())
 }
 
-fn extract_layer(reader: Box<dyn Read>, output_dir: &Path) -> anyhow::Result<()> {
-    let mut peekable = BufReader::new(reader);
-    let buffer = peekable
-        .fill_buf()
-        .context("failed to inspect layer bytes")?;
-    let is_gzip = buffer.starts_with(&[0x1f, 0x8b]);
+fn extract_layer(
+    reader: Box<dyn Read>,
+    expected_digest: &str,
+    output_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut verifier = DigestVerifier::new(reader, expected_digest).with_context(|| {
+        format!("failed to initialize digest verifier for layer {expected_digest}")
+    })?;
 
-    if is_gzip {
-        let decoder = GzDecoder::new(peekable);
-        Archive::new(decoder).unpack(output_dir).with_context(|| {
-            format!("failed to unpack gzip layer into {}", output_dir.display())
-        })?;
-    } else {
-        Archive::new(peekable)
-            .unpack(output_dir)
-            .with_context(|| format!("failed to unpack tar layer into {}", output_dir.display()))?;
+    {
+        let mut peekable = BufReader::new(&mut verifier);
+        let buffer = peekable
+            .fill_buf()
+            .context("failed to inspect layer bytes")?;
+        let is_gzip = buffer.starts_with(&[0x1f, 0x8b]);
+
+        if is_gzip {
+            let decoder = GzDecoder::new(&mut peekable);
+            Archive::new(decoder).unpack(output_dir).with_context(|| {
+                format!("failed to unpack gzip layer into {}", output_dir.display())
+            })?;
+        } else {
+            Archive::new(&mut peekable)
+                .unpack(output_dir)
+                .with_context(|| {
+                    format!("failed to unpack tar layer into {}", output_dir.display())
+                })?;
+        }
+
+        io::copy(&mut peekable, &mut io::sink())
+            .context("failed to finish reading layer bytes for digest verification")?;
     }
+
+    verifier
+        .verify()
+        .with_context(|| format!("failed to verify layer digest {expected_digest}"))?;
 
     Ok(())
 }
