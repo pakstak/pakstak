@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use context::Context;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Fetch and unpack OCI image layers")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -16,19 +16,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fetch an OCI image manifest and extract each layer.
+    /// Fetch and install an OCI image.
     Install {
-        /// User-provided app alias to install under ~/.var/pakstak/apps/<alias>.
+        /// User-provided app alias,
+        /// must be unique and only contain ASCII letters, numbers, dots, underscores, and dashes.
         alias: String,
         /// Image reference to install, for example alpine:latest or ghcr.io/org/app:tag.
         image: String,
     },
     /// Run a command inside an installed image rootfs.
     Run {
-        /// Installed app alias from ~/.var/pakstak/apps/<alias>.
-        app_alias: String,
-        /// Command and arguments to execute inside the container.
-        #[arg(required = true, trailing_var_arg = true)]
+        /// Installed app alias.
+        alias: String,
+        /// Command and arguments that are passed to the Bubblewrap.
+        #[arg(required = true, last = true)]
         command: Vec<String>,
     },
 }
@@ -39,6 +40,6 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Install { alias, image } => install::install(&ctx, &alias, &image),
-        Command::Run { app_alias, command } => run::run(&ctx, &app_alias, command),
+        Command::Run { alias, command } => run::run(&ctx, &alias, command),
     }
 }

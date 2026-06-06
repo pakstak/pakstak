@@ -164,7 +164,7 @@ impl ImageRef {
             let last_slash = input.rfind('/');
             let last_colon = input.rfind(':');
             if let Some(colon) = last_colon {
-                if last_slash.map_or(true, |slash| colon > slash) {
+                if last_slash.is_none_or(|slash| colon > slash) {
                     &input[..colon]
                 } else {
                     input
@@ -180,7 +180,7 @@ impl ImageRef {
             let last_slash = input.rfind('/');
             let last_colon = input.rfind(':');
             if let Some(colon) = last_colon {
-                if last_slash.map_or(true, |slash| colon > slash) {
+                if last_slash.is_none_or(|slash| colon > slash) {
                     &input[colon + 1..]
                 } else {
                     "latest"
@@ -251,17 +251,17 @@ impl RegistryClient {
         let fetched = self
             .fetch_manifest_bytes(reference)
             .with_context(|| format!("failed to fetch manifest bytes for `{reference}`"))?;
-        if let Ok(manifest) = serde_json::from_slice::<ImageManifest>(&fetched.bytes) {
-            if manifest.schema_version == 2 {
-                let digest = fetched.digest.with_context(|| {
-                    format!("registry did not provide manifest digest for `{reference}`")
-                })?;
-                return Ok(FetchedManifest {
-                    manifest,
-                    bytes: fetched.bytes,
-                    digest,
-                });
-            }
+        if let Ok(manifest) = serde_json::from_slice::<ImageManifest>(&fetched.bytes)
+            && manifest.schema_version == 2
+        {
+            let digest = fetched.digest.with_context(|| {
+                format!("registry did not provide manifest digest for `{reference}`")
+            })?;
+            return Ok(FetchedManifest {
+                manifest,
+                bytes: fetched.bytes,
+                digest,
+            });
         }
 
         let index: ImageIndex = serde_json::from_slice(&fetched.bytes)
