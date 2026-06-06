@@ -10,6 +10,17 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
+fn storage_path_from_env() -> anyhow::Result<PathBuf> {
+    if let Some(storage_path) = env::var_os("PAKSTAK_STORAGE_PATH") {
+        return Ok(PathBuf::from(storage_path));
+    }
+
+    let home_dir = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+    Ok(home_dir.join(".var").join("pakstak"))
+}
+
 #[derive(Debug)]
 pub struct Storage {
     storage_path: PathBuf,
@@ -28,10 +39,7 @@ impl Storage {
     }
 
     fn new_with_lock(lock_mode: LockMode) -> anyhow::Result<Self> {
-        let home_dir = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-        let storage_path = home_dir.join(".var").join("pakstak");
+        let storage_path = storage_path_from_env()?;
         let temporary_path = storage_path.join("temporary");
 
         let _lock = acquire_lock(&storage_path, lock_mode)?;
@@ -472,6 +480,11 @@ impl StorageMutable {
     }
 }
 
+#[derive(Debug)]
+struct StorageLock {
+    _file: File,
+}
+
 fn read_dir_entries(
     path: PathBuf,
     kind: &'static str,
@@ -573,7 +586,37 @@ fn extract_layer(
     Ok(())
 }
 
-#[derive(Debug)]
-struct StorageLock {
-    _file: File,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use temp_dir::TempDir;
+
+    fn storage_in_temp_dir() -> (Storage, TempDir) {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.child("storage");
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("PAKSTAK_STORAGE_PATH", &storage_path);
+        }
+        let storage = Storage::new().unwrap();
+
+        (storage, temp_dir)
+    }
+
+    #[test]
+    fn read_manifest_bytes_reports_missing_file_io_error() {
+        let (storage, _temp_dir) = storage_in_temp_dir();
+
+        let error = storage.read_manifest_bytes("sha256:missing").unwrap_err();
+        let io_error = error
+            .chain()
+            .find_map(|error| error.downcast_ref::<io::Error>())
+            .expect("error chain should include the underlying io::Error");
+
+        assert_eq!(io_error.kind(), io::ErrorKind::NotFound);
+    }
 }
