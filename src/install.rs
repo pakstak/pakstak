@@ -2,7 +2,7 @@ use crate::context::{Context, LockMode};
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
 use anyhow::{Context as _, anyhow, bail};
 use flate2::read::GzDecoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -18,15 +18,39 @@ struct AuthToken {
     access_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct ImageRef {
     registry: String,
     repository: String,
     reference: String,
 }
 
-pub fn install(ctx: &Context, image: &str) -> anyhow::Result<()> {
+#[derive(Debug, Serialize)]
+struct AppMetadata<'a> {
+    source: AppSourceMetadata<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppSourceMetadata<'a> {
+    image: &'a str,
+    registry: &'a str,
+    image_name: &'a str,
+    reference: &'a str,
+    tag: Option<&'a str>,
+    digest: Option<&'a str>,
+}
+
+pub fn install(ctx: &Context, alias: &str, image: &str) -> anyhow::Result<()> {
+    validate_alias(alias)?;
     let _lock = ctx.acquire_lock(LockMode::Exclusive)?;
+
+    let app_dir = ctx.storage_path.join("apps").join(alias);
+    if app_dir.exists() {
+        bail!(
+            "app alias `{alias}` already exists at {}",
+            app_dir.display()
+        );
+    }
 
     let image_ref = ImageRef::parse(image)
         .with_context(|| format!("failed to parse image reference `{image}`"))?;
@@ -46,7 +70,7 @@ pub fn install(ctx: &Context, image: &str) -> anyhow::Result<()> {
             )
         })?;
 
-    save_manifest(ctx, &fetched_manifest).with_context(|| {
+    let manifest_hash = save_manifest(ctx, &fetched_manifest).with_context(|| {
         format!(
             "failed to save manifest for {}/{}:{} under {}",
             image_ref.registry,
@@ -104,6 +128,34 @@ pub fn install(ctx: &Context, image: &str) -> anyhow::Result<()> {
                 return Err(err).with_context(|| format!("failed to fetch layer {}", layer.digest));
             }
         }
+    }
+
+    publish_app(ctx, &app_dir, image, &image_ref, &manifest_hash).with_context(|| {
+        format!(
+            "failed to publish app alias `{alias}` to {}",
+            app_dir.display()
+        )
+    })?;
+
+    eprintln!("installed {image} as {alias} with manifest {manifest_hash}");
+
+    Ok(())
+}
+
+fn validate_alias(alias: &str) -> anyhow::Result<()> {
+    if alias.is_empty() {
+        bail!("app alias cannot be empty");
+    }
+    if alias == "." || alias == ".." {
+        bail!("app alias `{alias}` is not allowed");
+    }
+    if !alias
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "app alias `{alias}` contains invalid characters; use only ASCII letters, numbers, dots, underscores, and dashes"
+        );
     }
 
     Ok(())
@@ -299,7 +351,7 @@ fn fetch_docker_token(repository: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("Docker auth response did not include a token"))
 }
 
-fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::Result<()> {
+fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::Result<String> {
     let output_dir = ctx.storage_path.join("manifests");
     fs::create_dir_all(&output_dir).with_context(|| {
         format!(
@@ -308,17 +360,68 @@ fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::R
         )
     })?;
 
-    let output_path = output_dir.join(format!(
-        "{}.json",
-        fetched_manifest
-            .digest
-            .split_once(':')
-            .map(|(_, hash)| hash)
-            .unwrap_or(&fetched_manifest.digest)
-    ));
+    let manifest_hash = manifest_hash(&fetched_manifest.digest);
+    let output_path = output_dir.join(format!("{manifest_hash}.json"));
 
     ctx.atomic_write(&output_path, &fetched_manifest.bytes)
-        .with_context(|| format!("failed to write manifest to {}", output_path.display()))
+        .with_context(|| format!("failed to write manifest to {}", output_path.display()))?;
+
+    Ok(manifest_hash)
+}
+
+fn publish_app(
+    ctx: &Context,
+    app_dir: &Path,
+    image: &str,
+    image_ref: &ImageRef,
+    manifest_hash: &str,
+) -> anyhow::Result<()> {
+    let temporary_app_dir = ctx.temporary_directory_for(app_dir)?;
+    fs::create_dir_all(&temporary_app_dir).with_context(|| {
+        format!(
+            "failed to create temporary app directory {}",
+            temporary_app_dir.display()
+        )
+    })?;
+
+    fs::write(temporary_app_dir.join("manifest"), manifest_hash).with_context(|| {
+        format!(
+            "failed to write temporary app manifest file in {}",
+            temporary_app_dir.display()
+        )
+    })?;
+
+    let metadata = AppMetadata {
+        source: AppSourceMetadata {
+            image,
+            registry: &image_ref.registry,
+            image_name: &image_ref.repository,
+            reference: &image_ref.reference,
+            tag: (!image_ref.reference.contains(':')).then_some(image_ref.reference.as_str()),
+            digest: image_ref
+                .reference
+                .contains(':')
+                .then_some(image_ref.reference.as_str()),
+        },
+    };
+    let metadata =
+        serde_json::to_vec_pretty(&metadata).context("failed to serialize app metadata")?;
+    fs::write(temporary_app_dir.join("metadata.json"), metadata).with_context(|| {
+        format!(
+            "failed to write temporary app metadata file in {}",
+            temporary_app_dir.display()
+        )
+    })?;
+
+    ctx.publish_directory(&temporary_app_dir, app_dir)
+}
+
+fn manifest_hash(manifest_digest: &str) -> String {
+    manifest_digest
+        .split_once(':')
+        .map(|(_, hash)| hash)
+        .unwrap_or(manifest_digest)
+        .to_string()
 }
 
 fn extract_layer(reader: Box<dyn Read>, output_dir: &Path) -> anyhow::Result<()> {

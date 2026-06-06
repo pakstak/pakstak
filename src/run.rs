@@ -5,11 +5,27 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-pub fn run(ctx: &Context, manifest_hash: &str, command: Vec<String>) -> anyhow::Result<()> {
+pub fn run(ctx: &Context, app_alias: &str, command: Vec<String>) -> anyhow::Result<()> {
     let _lock = ctx.acquire_lock(LockMode::Shared)?;
 
     if command.is_empty() {
         bail!("run command cannot be empty");
+    }
+
+    let app_manifest_path = ctx
+        .storage_path
+        .join("apps")
+        .join(app_alias)
+        .join("manifest");
+    let manifest_hash = fs::read_to_string(&app_manifest_path).with_context(|| {
+        format!(
+            "failed to read app manifest {}",
+            app_manifest_path.display()
+        )
+    })?;
+    let manifest_hash = manifest_hash.trim();
+    if manifest_hash.is_empty() {
+        bail!("app manifest {} is empty", app_manifest_path.display());
     }
 
     let manifest_path = ctx
