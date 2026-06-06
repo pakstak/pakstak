@@ -1,14 +1,14 @@
-mod context;
 mod digest;
 mod fetch;
 mod install;
 mod manifest;
 mod run;
+mod storage;
 mod update;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use context::Context;
+use storage::{Storage, StorageMutable};
 
 #[derive(Debug, Parser)]
 #[command(version)]
@@ -44,11 +44,19 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let ctx = Context::new().context("failed to initialize application context")?;
 
     match cli.command {
-        Command::Install { alias, image } => install::install(&ctx, &alias, &image),
-        Command::Update { aliases } => update::update(&ctx, aliases),
-        Command::Run { alias, command } => run::run(&ctx, &alias, command),
+        Command::Install { alias, image } => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            install::install(&storage, &alias, &image)
+        }
+        Command::Update { aliases } => {
+            let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
+            update::update(&storage, aliases)
+        }
+        Command::Run { alias, command } => {
+            let storage = Storage::new().context("failed to initialize storage")?;
+            run::run(&storage, &alias, command)
+        }
     }
 }

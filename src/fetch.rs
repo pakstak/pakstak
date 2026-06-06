@@ -1,13 +1,9 @@
-use crate::context::Context;
-use crate::digest::{self, DigestVerifier};
+use crate::digest;
 use crate::manifest::{FetchedManifest, ImageIndex, ImageManifest};
+use crate::storage::StorageMutable;
 use anyhow::{Context as _, anyhow, bail};
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
-use tar::Archive;
+use std::io::{BufReader, Read};
 
 const DOCKER_AUTH: &str = "https://auth.docker.io/token";
 const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
@@ -279,7 +275,10 @@ pub fn validate_alias(alias: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn fetch_image(ctx: &Context, image_ref: &ImageRef) -> anyhow::Result<FetchedManifest> {
+pub fn fetch_image(
+    storage: &StorageMutable,
+    image_ref: &ImageRef,
+) -> anyhow::Result<FetchedManifest> {
     let client = RegistryClient::new(image_ref.registry.clone(), image_ref.repository.clone())
         .with_context(|| {
             format!(
@@ -296,11 +295,7 @@ pub fn fetch_image(ctx: &Context, image_ref: &ImageRef) -> anyhow::Result<Fetche
             )
         })?;
 
-    let manifest_path = ctx
-        .storage_path
-        .join("manifests")
-        .join(format!("{}.json", fetched_manifest.digest));
-    if manifest_path.is_file() {
+    if storage.is_manifest_saved(&fetched_manifest.digest) {
         eprintln!(
             "manifest {} already saved; skipping layer fetch",
             fetched_manifest.digest
@@ -308,17 +303,9 @@ pub fn fetch_image(ctx: &Context, image_ref: &ImageRef) -> anyhow::Result<Fetche
         return Ok(fetched_manifest);
     }
 
-    fetch_layers(ctx, &client, &fetched_manifest)?;
+    fetch_layers(storage, &client, &fetched_manifest)?;
 
-    save_manifest(ctx, &fetched_manifest).with_context(|| {
-        format!(
-            "failed to save manifest for {}/{}:{} under {}",
-            image_ref.registry,
-            image_ref.repository,
-            image_ref.reference,
-            ctx.storage_path.display()
-        )
-    })?;
+    storage.write_manifest(&fetched_manifest.digest, &fetched_manifest.bytes)?;
 
     Ok(fetched_manifest)
 }
@@ -337,20 +324,8 @@ fn fetch_docker_token(repository: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("Docker auth response did not include a token"))
 }
 
-fn save_manifest(ctx: &Context, fetched_manifest: &FetchedManifest) -> anyhow::Result<String> {
-    let output_path = ctx
-        .storage_path
-        .join("manifests")
-        .join(format!("{}.json", fetched_manifest.digest));
-
-    ctx.atomic_write(&output_path, &fetched_manifest.bytes)
-        .with_context(|| format!("failed to write manifest to {}", output_path.display()))?;
-
-    Ok(fetched_manifest.digest.clone())
-}
-
 fn fetch_layers(
-    ctx: &Context,
+    storage: &StorageMutable,
     client: &RegistryClient,
     fetched_manifest: &FetchedManifest,
 ) -> anyhow::Result<()> {
@@ -361,83 +336,25 @@ fn fetch_layers(
     );
 
     for layer in &fetched_manifest.manifest.layers {
-        let output_dir = ctx.storage_path.join("layers").join(&layer.digest);
-        if output_dir.exists() {
-            eprintln!(
-                "layer {} already extracted to {}",
-                layer.digest,
-                output_dir.display()
-            );
+        if storage.get_layer_path(&layer.digest).is_some() {
+            eprintln!("layer {} already extracted", layer.digest);
             continue;
         }
 
-        let temporary_output_dir = ctx.temporary_directory_for(&output_dir)?;
-        fs::create_dir_all(&temporary_output_dir).with_context(|| {
-            format!(
-                "failed to create temporary layer output directory {}",
-                temporary_output_dir.display()
-            )
-        })?;
         match client.fetch_blob_reader(&layer.digest) {
             Ok(reader) => {
-                extract_layer(reader, &layer.digest, &temporary_output_dir)
-                    .with_context(|| format!("failed to extract layer {}", layer.digest))?;
-                ctx.publish_directory(&temporary_output_dir, &output_dir)
+                storage
+                    .write_layer(&layer.digest, reader)
                     .with_context(|| {
-                        format!(
-                            "failed to publish layer {} to {}",
-                            layer.digest,
-                            output_dir.display()
-                        )
+                        format!("failed to fetch and extract layer {}", layer.digest)
                     })?;
-                eprintln!("extracted {} to {}", layer.digest, output_dir.display());
+                eprintln!("extracted {}", layer.digest);
             }
             Err(err) => {
-                let _ = fs::remove_dir_all(&temporary_output_dir);
                 return Err(err).with_context(|| format!("failed to fetch layer {}", layer.digest));
             }
         }
     }
-
-    Ok(())
-}
-
-fn extract_layer(
-    reader: Box<dyn Read>,
-    expected_digest: &str,
-    output_dir: &Path,
-) -> anyhow::Result<()> {
-    let mut verifier = DigestVerifier::new(reader, expected_digest).with_context(|| {
-        format!("failed to initialize digest verifier for layer {expected_digest}")
-    })?;
-
-    {
-        let mut peekable = BufReader::new(&mut verifier);
-        let buffer = peekable
-            .fill_buf()
-            .context("failed to inspect layer bytes")?;
-        let is_gzip = buffer.starts_with(&[0x1f, 0x8b]);
-
-        if is_gzip {
-            let decoder = GzDecoder::new(&mut peekable);
-            Archive::new(decoder).unpack(output_dir).with_context(|| {
-                format!("failed to unpack gzip layer into {}", output_dir.display())
-            })?;
-        } else {
-            Archive::new(&mut peekable)
-                .unpack(output_dir)
-                .with_context(|| {
-                    format!("failed to unpack tar layer into {}", output_dir.display())
-                })?;
-        }
-
-        io::copy(&mut peekable, &mut io::sink())
-            .context("failed to finish reading layer bytes for digest verification")?;
-    }
-
-    verifier
-        .verify()
-        .with_context(|| format!("failed to verify layer digest {expected_digest}"))?;
 
     Ok(())
 }

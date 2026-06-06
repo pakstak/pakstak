@@ -1,37 +1,15 @@
-use crate::context::{Context, LockMode};
-use crate::manifest::ImageManifest;
+use crate::storage::Storage;
 use anyhow::{Context as _, bail};
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-pub fn run(ctx: &Context, alias: &str, command: Vec<String>) -> anyhow::Result<()> {
-    let _lock = ctx.acquire_lock(LockMode::Shared)?;
-
+pub fn run(storage: &Storage, alias: &str, command: Vec<String>) -> anyhow::Result<()> {
     if command.is_empty() {
         bail!("run command cannot be empty");
     }
 
-    let app_manifest_path = ctx.storage_path.join("apps").join(alias).join("manifest");
-    let manifest_digest = fs::read_to_string(&app_manifest_path).with_context(|| {
-        format!(
-            "failed to read app manifest {}",
-            app_manifest_path.display()
-        )
-    })?;
-    let manifest_digest = manifest_digest.trim();
-    if manifest_digest.is_empty() {
-        bail!("app manifest {} is empty", app_manifest_path.display());
-    }
-
-    let manifest_path = ctx
-        .storage_path
-        .join("manifests")
-        .join(format!("{manifest_digest}.json"));
-    let manifest_bytes = fs::read(&manifest_path)
-        .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
-    let manifest: ImageManifest = serde_json::from_slice(&manifest_bytes)
-        .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))?;
+    let manifest_digest = storage.read_app_manifest_digest(alias)?;
+    let manifest = storage.read_manifest(&manifest_digest)?;
 
     let mut bwrap = Command::new("bwrap");
     bwrap
@@ -47,14 +25,9 @@ pub fn run(ctx: &Context, alias: &str, command: Vec<String>) -> anyhow::Result<(
 
     let mut layer_paths = Vec::with_capacity(manifest.layers.len());
     for layer in &manifest.layers {
-        let layer_path = ctx.storage_path.join("layers").join(&layer.digest);
-        if !layer_path.is_dir() {
-            bail!(
-                "layer {} is missing at {}; install the image first",
-                layer.digest,
-                layer_path.display()
-            );
-        }
+        let layer_path = storage.get_layer_path(&layer.digest).with_context(|| {
+            format!("layer {} is missing; install the image first", layer.digest)
+        })?;
 
         layer_paths.push(layer_path);
     }
