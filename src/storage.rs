@@ -28,11 +28,6 @@ pub struct Storage {
     _lock: StorageLock,
 }
 
-#[derive(Debug)]
-pub struct StorageMutable {
-    storage: Storage,
-}
-
 impl Storage {
     pub fn new() -> anyhow::Result<Self> {
         Self::new_with_lock(LockMode::Shared)
@@ -221,6 +216,11 @@ impl Storage {
                 )
             })?))
     }
+}
+
+#[derive(Debug)]
+pub struct StorageMutable {
+    storage: Storage,
 }
 
 impl StorageMutable {
@@ -490,11 +490,6 @@ impl StorageMutable {
     }
 }
 
-#[derive(Debug)]
-struct StorageLock {
-    _file: File,
-}
-
 fn read_dir_entries(
     path: PathBuf,
     kind: &'static str,
@@ -524,6 +519,11 @@ fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
             .with_context(|| format!("failed to create output directory {}", parent.display()))?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct StorageLock {
+    _file: File,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -602,24 +602,81 @@ mod tests {
     use std::sync::Mutex;
     use temp_dir::TempDir;
 
-    fn storage_in_temp_dir() -> (Storage, TempDir) {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Lock for storage initialization.
+    // Is used to set_env and initialize Storage with it;
+    // guard is dropped after that.
+    // This to prevent parallel tests racing with setting the env var
+    // and initializing the storage.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-        let temp_dir = TempDir::new().unwrap();
-        let storage_path = temp_dir.child("storage");
+    fn storage_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<Storage> {
+        let storage_path = storage_parent.as_ref().join("storage");
 
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             env::set_var("PAKSTAK_STORAGE_PATH", &storage_path);
         }
-        let storage = Storage::new().unwrap();
+        Storage::new()
+    }
 
-        (storage, temp_dir)
+    fn storage_mutable_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<StorageMutable> {
+        let storage_path = storage_parent.as_ref().join("storage");
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("PAKSTAK_STORAGE_PATH", &storage_path);
+        }
+        StorageMutable::new()
+    }
+
+    #[test]
+    fn storage_creates_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let _storage = storage_in(&temp_dir).unwrap();
+
+        assert!(temp_dir.path().join("storage").join(".lock").is_file());
+    }
+
+    #[test]
+    fn storage_holds_shared_lock_on_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let _storage = storage_in(&temp_dir).unwrap();
+        let lock_file = File::open(temp_dir.path().join("storage").join(".lock")).unwrap();
+
+        lock_file.try_lock_shared().unwrap();
+        lock_file.try_lock().unwrap_err();
+    }
+
+    #[test]
+    fn storage_mutable_holds_exclusive_lock_on_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let _storage_mutable = storage_mutable_in(&temp_dir).unwrap();
+        let lock_file = File::open(temp_dir.path().join("storage").join(".lock")).unwrap();
+
+        lock_file.try_lock_shared().unwrap_err();
+        lock_file.try_lock().unwrap_err();
+    }
+
+    #[test]
+    fn storage_mutable_rejects_existing_storage() {
+        let temp_dir = TempDir::new().unwrap();
+        let _storage = storage_in(&temp_dir).unwrap();
+
+        storage_mutable_in(&temp_dir).unwrap_err();
+    }
+
+    #[test]
+    fn storage_rejects_existing_storage_mutable() {
+        let temp_dir = TempDir::new().unwrap();
+        let _storage_mutable = storage_mutable_in(&temp_dir).unwrap();
+
+        storage_in(&temp_dir).unwrap_err();
     }
 
     #[test]
     fn read_manifest_bytes_reports_missing_file_io_error() {
-        let (storage, _temp_dir) = storage_in_temp_dir();
+        let temp_dir = TempDir::new().unwrap();
+        let storage = storage_in(&temp_dir).unwrap();
 
         let error = storage.read_manifest_bytes("sha256:missing").unwrap_err();
         let io_error = error
