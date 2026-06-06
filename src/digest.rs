@@ -101,11 +101,6 @@ pub fn verify_bytes(bytes: &[u8], expected_digest: &str) -> Result<(), DigestErr
     verifier.verify().map_err(DigestError::from)
 }
 
-pub fn sha256_digest(bytes: &[u8]) -> String {
-    let digest = digest::digest(&digest::SHA256, bytes);
-    format!("sha256:{}", encode_hex(digest.as_ref()))
-}
-
 fn algorithm(name: &str) -> Option<&'static digest::Algorithm> {
     match name {
         "sha256" => Some(&digest::SHA256),
@@ -144,9 +139,10 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    hex
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut hex, byte| {
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+            hex
+        })
 }

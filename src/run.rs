@@ -23,14 +23,15 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
         .arg("--tmpfs")
         .arg("/tmp");
 
-    let mut layer_paths = Vec::with_capacity(manifest.layers.len());
-    for layer in &manifest.layers {
-        let layer_path = storage.get_layer_path(&layer.digest).with_context(|| {
-            format!("layer {} is missing; install the image first", layer.digest)
-        })?;
-
-        layer_paths.push(layer_path);
-    }
+    let layer_paths = manifest
+        .layers
+        .iter()
+        .map(|layer| {
+            storage.get_layer_path(&layer.digest).with_context(|| {
+                format!("layer {} is missing; install the image first", layer.digest)
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     match layer_paths.as_slice() {
         [] => bail!("manifest does not contain any layers"),

@@ -11,7 +11,9 @@ pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Resu
     }
 
     if containers.is_empty() {
-        containers.extend(storage.read_containers()?);
+        for container in storage.read_containers()? {
+            containers.insert(container.context("failed to read installed container name")?);
+        }
     }
 
     for container in containers {

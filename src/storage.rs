@@ -68,41 +68,45 @@ impl Storage {
             .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))
     }
 
-    pub fn read_manifest_digests(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_manifest_digests(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         let manifests_path = self.manifests_path();
-        let mut manifests = Vec::new();
-        for entry in read_dir_entries(&manifests_path, "manifests")? {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let file_name = entry.file_name().into_string().map_err(|name| {
-                anyhow::anyhow!("manifest file name {:?} is not valid UTF-8", name)
-            })?;
-            let digest = file_name.strip_suffix(".json").with_context(|| {
-                format!("manifest file {} does not end with .json", path.display())
-            })?;
-            manifests.push(digest.to_string());
-        }
-        Ok(manifests)
+        Ok(read_dir_entries(manifests_path, "manifests")?
+            .filter_map(|entry| match entry {
+                Ok(entry) if entry.path().is_file() => Some(Ok(entry)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .map(|entry| {
+                let entry = entry?;
+                let path = entry.path();
+                let file_name = entry.file_name().into_string().map_err(|name| {
+                    anyhow::anyhow!("manifest file name {:?} is not valid UTF-8", name)
+                })?;
+                let digest = file_name.strip_suffix(".json").with_context(|| {
+                    format!("manifest file {} does not end with .json", path.display())
+                })?;
+                Ok(digest.to_string())
+            }))
     }
 
-    pub fn read_layer_digests(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_layer_digests(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         let layers_path = self.layers_path();
-        let mut layers = Vec::new();
-        for entry in read_dir_entries(&layers_path, "layers")? {
-            if !entry.path().is_dir() {
-                continue;
-            }
-
-            let layer = entry
-                .file_name()
-                .into_string()
-                .map_err(|name| anyhow::anyhow!("layer name {:?} is not valid UTF-8", name))?;
-            layers.push(layer);
-        }
-        Ok(layers)
+        Ok(read_dir_entries(layers_path, "layers")?
+            .filter_map(|entry| match entry {
+                Ok(entry) if entry.path().is_dir() => Some(Ok(entry)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|name| anyhow::anyhow!("layer name {:?} is not valid UTF-8", name))
+            }))
     }
 
     pub fn read_container_reference(&self, container: &str) -> anyhow::Result<Reference> {
@@ -113,21 +117,22 @@ impl Storage {
             .with_context(|| format!("failed to parse reference {}", reference_path.display()))
     }
 
-    pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_containers(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         let containers_path = self.containers_path();
-        let mut containers = Vec::new();
-        for entry in read_dir_entries(&containers_path, "containers")? {
-            if !entry.path().is_dir() {
-                continue;
-            }
-
-            let container = entry
-                .file_name()
-                .into_string()
-                .map_err(|name| anyhow::anyhow!("container name {:?} is not valid UTF-8", name))?;
-            containers.push(container);
-        }
-        Ok(containers)
+        Ok(read_dir_entries(containers_path, "containers")?
+            .filter_map(|entry| match entry {
+                Ok(entry) if entry.path().is_dir() => Some(Ok(entry)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|name| anyhow::anyhow!("container name {:?} is not valid UTF-8", name))
+            }))
     }
 
     pub fn get_layer_path(&self, digest: &str) -> Option<PathBuf> {
@@ -210,7 +215,9 @@ impl StorageMutable {
         self.storage.read_container_reference(container)
     }
 
-    pub fn read_containers(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_containers(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         self.storage.read_containers()
     }
 
@@ -218,11 +225,15 @@ impl StorageMutable {
         self.storage.read_manifest(digest)
     }
 
-    pub fn read_manifest_digests(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_manifest_digests(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         self.storage.read_manifest_digests()
     }
 
-    pub fn read_layer_digests(&self) -> anyhow::Result<Vec<String>> {
+    pub fn read_layer_digests(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
         self.storage.read_layer_digests()
     }
 
@@ -434,26 +445,27 @@ impl StorageMutable {
     }
 }
 
-fn read_dir_entries(path: &Path, kind: &str) -> anyhow::Result<Vec<fs::DirEntry>> {
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+fn read_dir_entries(
+    path: PathBuf,
+    kind: &'static str,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<fs::DirEntry>>> {
+    let entries = match fs::read_dir(&path) {
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("failed to read {kind} directory {}", path.display()));
         }
     };
 
-    entries
-        .map(|entry| {
-            entry.with_context(|| {
-                format!(
-                    "failed to read {kind} directory entry under {}",
-                    path.display()
-                )
-            })
+    Ok(entries.into_iter().flatten().map(move |entry| {
+        entry.with_context(|| {
+            format!(
+                "failed to read {kind} directory entry under {}",
+                path.display()
+            )
         })
-        .collect()
+    }))
 }
 
 fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {

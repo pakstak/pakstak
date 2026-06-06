@@ -19,7 +19,7 @@ pub struct RegistryClient {
 
 struct ManifestBytes {
     bytes: Vec<u8>,
-    digest: Option<String>,
+    digest: String,
     media_type: Option<String>,
 }
 
@@ -48,32 +48,22 @@ impl RegistryClient {
                     specifier.as_typeless_str()
                 )
             })?;
-        let requested_digest = match specifier {
-            Specifier::Digest(v) => Some(v.as_str()),
-            _ => None,
-        };
-        if let Some(digest) = requested_digest.or(fetched.digest.as_deref()) {
-            digest::verify_bytes(&fetched.bytes, digest)
-                .with_context(|| format!("failed to verify manifest digest {digest}"))?;
-        }
-
         match fetched.media_type.as_deref().map(ManifestMediaType::parse) {
             Some(ManifestMediaType::Index) => self.handle_image_index(&fetched, specifier),
             Some(ManifestMediaType::Manifest) => {
-                parse_image_manifest(fetched, requested_digest, specifier.as_typeless_str())
+                parse_image_manifest(fetched, specifier.as_typeless_str())
             }
             Some(ManifestMediaType::Unsupported) | None => {
                 let index_error = match self.handle_image_index(&fetched, specifier) {
                     Ok(manifest) => return Ok(manifest),
                     Err(error) => error,
                 };
-                parse_image_manifest(fetched, requested_digest, specifier.as_typeless_str())
-                    .with_context(|| {
-                        format!(
-                            "failed to parse as image manifest after \
+                parse_image_manifest(fetched, specifier.as_typeless_str()).with_context(|| {
+                    format!(
+                        "failed to parse as image manifest after \
                             fallback index parse failed: {index_error}"
-                        )
-                    })
+                    )
+                })
             }
         }
     }
@@ -106,10 +96,7 @@ impl RegistryClient {
                 OCI_IMAGE_MANIFEST_MEDIA_TYPE,
             )
             .with_context(|| format!("failed to fetch platform manifest {descriptor_digest}"))?;
-        digest::verify_bytes(&fetched.bytes, &descriptor_digest).with_context(|| {
-            format!("failed to verify platform manifest digest {descriptor_digest}")
-        })?;
-        parse_image_manifest(fetched, Some(&descriptor_digest), &descriptor_digest)
+        parse_image_manifest(fetched, &descriptor_digest)
     }
 
     fn fetch_manifest_bytes(
@@ -127,21 +114,30 @@ impl RegistryClient {
             .call_with_auth_retry("GET", &url, |request| request.set("Accept", accept))
             .with_context(|| format!("registry request failed: GET {url}"))?;
         let media_type = response.header("Content-Type").map(str::to_string);
+        let header_digest = response
+            .header("Docker-Content-Digest")
+            .context("registry response did not include Docker-Content-Digest header")?
+            .to_string();
 
         let mut bytes = Vec::new();
         response
             .into_reader()
             .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read manifest response body from {url}"))?;
-        let digest = Some(digest::sha256_digest(&bytes));
+        digest::verify_bytes(&bytes, &header_digest)
+            .with_context(|| format!("failed to verify manifest digest {header_digest}"))?;
+        if let Specifier::Digest(requested_digest) = specifier {
+            digest::verify_bytes(&bytes, requested_digest)
+                .with_context(|| format!("failed to verify manifest digest {requested_digest}"))?;
+        }
         Ok(ManifestBytes {
             bytes,
-            digest,
+            digest: header_digest,
             media_type,
         })
     }
 
-    fn fetch_blob_reader(&mut self, digest: &str) -> anyhow::Result<Box<dyn Read>> {
+    fn fetch_blob_reader(&mut self, digest: &str) -> anyhow::Result<impl Read> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
             self.registry, self.repository, digest
@@ -150,7 +146,7 @@ impl RegistryClient {
             .call_with_auth_retry("GET", &url, |request| request.set("Accept", LAYER_ACCEPT))
             .with_context(|| format!("registry request failed: GET {url}"))?;
 
-        Ok(Box::new(BufReader::new(response.into_reader())))
+        Ok(BufReader::new(response.into_reader()))
     }
 
     fn call_with_auth_retry<F>(
@@ -191,7 +187,6 @@ impl RegistryClient {
 
 fn parse_image_manifest(
     fetched: ManifestBytes,
-    digest_fallback: Option<&str>,
     manifest_context: &str,
 ) -> anyhow::Result<FetchedManifest> {
     let manifest: ImageManifest = serde_json::from_slice(&fetched.bytes)
@@ -199,16 +194,10 @@ fn parse_image_manifest(
     if manifest.schema_version != 2 {
         bail!("unsupported image manifest schema");
     }
-    let digest = fetched
-        .digest
-        .or_else(|| digest_fallback.map(str::to_string))
-        .with_context(|| {
-            format!("registry did not provide manifest digest for `{manifest_context}`")
-        })?;
     Ok(FetchedManifest {
         manifest,
         bytes: fetched.bytes,
-        digest,
+        digest: fetched.digest,
     })
 }
 
