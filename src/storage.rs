@@ -707,7 +707,7 @@ fn extract_layer(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
     use temp_dir::TempDir;
@@ -719,7 +719,7 @@ mod tests {
     // and initializing the storage.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn storage_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<Storage> {
+    pub(crate) fn storage_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<Storage> {
         let storage_path = storage_parent.as_ref().join("storage");
 
         let _guard = ENV_LOCK.lock().unwrap();
@@ -802,6 +802,64 @@ mod tests {
         let _storage_mutable = storage_mutable_in(&temp_dir).unwrap();
 
         storage_in(&temp_dir).unwrap_err();
+    }
+
+    #[test]
+    fn layer_lock_for_prune_fails_on_existing_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path().join("storage");
+        let lock_path = storage_path
+            .join("locks")
+            .join("layers")
+            .join("sha256:layer");
+        ensure_parent_dir(&lock_path).unwrap();
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        let lock = libc::flock {
+            l_type: libc::F_RDLCK as libc::c_short,
+            l_whence: libc::SEEK_SET as libc::c_short,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        let result = unsafe { libc::fcntl(lock_file.as_raw_fd(), libc::F_SETLK, &lock) };
+        assert_eq!(result, 0);
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("storage::tests::layer_lock_for_prune_child_observes_shared_fcntl_lock")
+            .arg("--ignored")
+            .env("PAKSTAK_FCNTL_LAYER_LOCK_TEST_STORAGE", temp_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child test failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper test run by layer_lock_for_prune_fails_on_existing_lock"]
+    fn layer_lock_for_prune_child_observes_shared_fcntl_lock() {
+        let Some(storage_parent) = env::var_os("PAKSTAK_FCNTL_LAYER_LOCK_TEST_STORAGE") else {
+            return;
+        };
+        let storage_mutable = storage_mutable_in(&PathBuf::from(storage_parent)).unwrap();
+
+        match storage_mutable.lock_layer_for_prune("sha256:layer") {
+            LayerLockResult::Failed => {}
+            LayerLockResult::Acquired(_) => panic!("prune unexpectedly acquired a locked layer"),
+            LayerLockResult::Error(error) => panic!("unexpected error locking layer: {error:#}"),
+        }
     }
 
     #[test]

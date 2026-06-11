@@ -5,6 +5,16 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::Result<()> {
+    let mut bwrap = build_bwrap_command(storage, container, command)?;
+
+    Err(bwrap.exec()).context("failed to replace process with bwrap")
+}
+
+fn build_bwrap_command(
+    storage: &Storage,
+    container: &str,
+    command: Vec<String>,
+) -> anyhow::Result<Command> {
     if command.is_empty() {
         bail!("run command cannot be empty");
     }
@@ -75,5 +85,75 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
 
     bwrap.args(command);
 
-    Err(bwrap.exec()).context("failed to replace process with bwrap")
+    Ok(bwrap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::tests::storage_in;
+    use std::ffi::OsString;
+    use std::fs;
+    use temp_dir::TempDir;
+
+    #[test]
+    fn bwrap_locks_each_layer_inside_sandbox() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path().join("storage");
+        let storage = storage_in(&temp_dir).unwrap();
+
+        fs::create_dir_all(storage_path.join("containers").join("test")).unwrap();
+        fs::write(
+            storage_path
+                .join("containers")
+                .join("test")
+                .join("manifest_digest"),
+            "sha256:manifest",
+        )
+        .unwrap();
+        fs::create_dir_all(storage_path.join("manifests")).unwrap();
+        fs::write(
+            storage_path.join("manifests").join("sha256:manifest.json"),
+            "{\"schemaVersion\":2,\"layers\":[{\"digest\":\"sha256:one\"},{\"digest\":\"sha256:two\"}]}",
+        )
+        .unwrap();
+        fs::create_dir_all(storage_path.join("layers").join("sha256:one")).unwrap();
+        fs::create_dir_all(storage_path.join("layers").join("sha256:two")).unwrap();
+
+        let bwrap = build_bwrap_command(&storage, "test", vec!["/bin/sh".to_string()]).unwrap();
+        let args: Vec<OsString> = bwrap.get_args().map(OsString::from).collect();
+        let first_lock_mount = args
+            .iter()
+            .enumerate()
+            .position(|(index, arg)| {
+                arg == "--ro-bind"
+                    && args.get(index + 2) == Some(&OsString::from("/tmp/.layer_locks/0"))
+            })
+            .expect("bwrap args should mount layer locks inside the sandbox");
+
+        assert_eq!(
+            &args[first_lock_mount..],
+            &[
+                OsString::from("--ro-bind"),
+                storage_path
+                    .join("locks")
+                    .join("layers")
+                    .join("sha256:one")
+                    .into(),
+                OsString::from("/tmp/.layer_locks/0"),
+                OsString::from("--lock-file"),
+                OsString::from("/tmp/.layer_locks/0"),
+                OsString::from("--ro-bind"),
+                storage_path
+                    .join("locks")
+                    .join("layers")
+                    .join("sha256:two")
+                    .into(),
+                OsString::from("/tmp/.layer_locks/1"),
+                OsString::from("--lock-file"),
+                OsString::from("/tmp/.layer_locks/1"),
+                OsString::from("/bin/sh"),
+            ]
+        );
+    }
 }
