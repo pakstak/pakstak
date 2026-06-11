@@ -18,11 +18,25 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
 
     bwrap.arg("--clearenv").arg("--unshare-all");
 
+    const LAYER_LOCKS_DIR: &str = "/tmp/.layer_locks";
+
     let get_layer_path = |layer: &Descriptor| {
         storage
             .get_layer_path(&layer.digest)
             .with_context(|| format!("layer {} is missing; install the image first", layer.digest))
     };
+
+    let layer_lock_paths = manifest
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            Ok((
+                storage.create_layer_lock_file(&layer.digest)?,
+                format!("{LAYER_LOCKS_DIR}/{index}"),
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     match manifest.layers.len() {
         0 => bail!("manifest does not contain any layers"),
@@ -33,8 +47,8 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
                 .arg("/");
         }
         _ => {
-            for layer in manifest.layers {
-                bwrap.arg("--overlay-src").arg(get_layer_path(&layer)?);
+            for layer in &manifest.layers {
+                bwrap.arg("--overlay-src").arg(get_layer_path(layer)?);
             }
             bwrap.arg("--ro-overlay").arg("/");
         }
@@ -46,7 +60,18 @@ pub fn run(storage: &Storage, container: &str, command: Vec<String>) -> anyhow::
         .arg("--dev")
         .arg("/dev")
         .arg("--tmpfs")
-        .arg("/tmp");
+        .arg("/tmp")
+        .arg("--dir")
+        .arg(LAYER_LOCKS_DIR);
+
+    for (host_path, sandbox_path) in &layer_lock_paths {
+        bwrap
+            .arg("--ro-bind")
+            .arg(host_path)
+            .arg(sandbox_path)
+            .arg("--lock-file")
+            .arg(sandbox_path);
+    }
 
     bwrap.args(command);
 

@@ -7,6 +7,7 @@ use flate2::read::GzDecoder;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
@@ -149,6 +150,14 @@ impl Storage {
         layer_path.is_dir().then_some(layer_path)
     }
 
+    pub fn create_layer_lock_file(&self, digest: &str) -> anyhow::Result<PathBuf> {
+        let lock_path = self.layer_lock_path(digest);
+        ensure_parent_dir(&lock_path)?;
+        File::create(&lock_path)
+            .with_context(|| format!("failed to create layer lock file {}", lock_path.display()))?;
+        Ok(lock_path)
+    }
+
     pub fn is_container_taken(&self, container: &str) -> bool {
         self.container_path(container).is_dir()
     }
@@ -204,6 +213,18 @@ impl Storage {
 
     fn layer_path(&self, digest: &str) -> PathBuf {
         self.layers_path().join(digest)
+    }
+
+    fn locks_path(&self) -> PathBuf {
+        self.storage_path.join("locks")
+    }
+
+    fn layer_locks_path(&self) -> PathBuf {
+        self.locks_path().join("layers")
+    }
+
+    fn layer_lock_path(&self, digest: &str) -> PathBuf {
+        self.layer_locks_path().join(digest)
     }
 
     fn temporary_path_for(&self, output_path: &Path) -> anyhow::Result<PathBuf> {
@@ -282,6 +303,52 @@ impl StorageMutable {
 
     pub fn get_layer_path(&self, digest: &str) -> Option<PathBuf> {
         self.storage.get_layer_path(digest)
+    }
+
+    pub fn lock_layer_for_prune(&self, digest: &str) -> LayerLockResult {
+        let lock_path = self.storage.layer_lock_path(digest);
+        if let Err(error) = ensure_parent_dir(&lock_path) {
+            return LayerLockResult::Error(error);
+        }
+
+        let file = match File::create(&lock_path)
+            .with_context(|| format!("failed to open layer lock file {}", lock_path.display()))
+        {
+            Ok(file) => file,
+            Err(error) => return LayerLockResult::Error(error),
+        };
+
+        if let Err(error) = try_lock_layer_for_prune(&file) {
+            return match error.kind() {
+                io::ErrorKind::WouldBlock => LayerLockResult::Failed,
+                _ => LayerLockResult::Error(anyhow::Error::new(error).context(format!(
+                    "failed to acquire layer lock {}",
+                    lock_path.display()
+                ))),
+            };
+        }
+
+        LayerLockResult::Acquired(LayerLock {
+            _file: file,
+            path: lock_path,
+        })
+    }
+
+    pub fn read_layer_lock_digests(
+        &self,
+    ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>> + '_> {
+        let layer_locks_path = self.storage.layer_locks_path();
+        Ok(read_dir_entries(layer_locks_path, "layer locks")?
+            .filter_map(|entry| match entry {
+                Ok(entry) if entry.path().is_file() => Some(Ok(entry)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .map(|entry| {
+                entry?.file_name().into_string().map_err(|name| {
+                    anyhow::anyhow!("layer lock name {:?} is not valid UTF-8", name)
+                })
+            }))
     }
 
     pub fn is_container_taken(&self, container: &str) -> bool {
@@ -521,6 +588,48 @@ fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn try_lock_layer_for_prune(file: &File) -> io::Result<()> {
+    let lock = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+
+    // bwrap --lock-file uses POSIX fcntl locks, so prune must use the same
+    // lock family to observe running sandboxes.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) };
+    if result == -1 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EAGAIN)) {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct LayerLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl LayerLock {
+    pub fn remove_file(self) -> anyhow::Result<()> {
+        fs::remove_file(&self.path)
+            .with_context(|| format!("failed to remove layer lock file {}", self.path.display()))
+    }
+}
+
+pub enum LayerLockResult {
+    Acquired(LayerLock),
+    Failed,
+    Error(anyhow::Error),
+}
+
 #[derive(Debug)]
 struct StorageLock {
     _file: File,
@@ -540,11 +649,12 @@ fn acquire_lock(storage_path: &Path, mode: LockMode) -> anyhow::Result<StorageLo
         )
     })?;
 
-    let lock_path = storage_path.join(".lock");
+    let lock_path = storage_path.join("locks").join("storage");
+    ensure_parent_dir(&lock_path)?;
 
-    // `.lock` serializes access to the storage directory. Readers hold a shared
-    // lock, while mutating commands hold an exclusive lock so they cannot publish
-    // partial state while another process is reading.
+    // `locks/storage` serializes access to the storage directory. Readers hold a
+    // shared lock, while mutating commands hold an exclusive lock so they cannot
+    // publish partial state while another process is reading.
     let file = File::create(&lock_path)
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     match mode {
@@ -634,14 +744,28 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let _storage = storage_in(&temp_dir).unwrap();
 
-        assert!(temp_dir.path().join("storage").join(".lock").is_file());
+        assert!(
+            temp_dir
+                .path()
+                .join("storage")
+                .join("locks")
+                .join("storage")
+                .is_file()
+        );
     }
 
     #[test]
     fn storage_holds_shared_lock_on_lock_file() {
         let temp_dir = TempDir::new().unwrap();
         let _storage = storage_in(&temp_dir).unwrap();
-        let lock_file = File::open(temp_dir.path().join("storage").join(".lock")).unwrap();
+        let lock_file = File::open(
+            temp_dir
+                .path()
+                .join("storage")
+                .join("locks")
+                .join("storage"),
+        )
+        .unwrap();
 
         lock_file.try_lock_shared().unwrap();
         lock_file.try_lock().unwrap_err();
@@ -651,7 +775,14 @@ mod tests {
     fn storage_mutable_holds_exclusive_lock_on_lock_file() {
         let temp_dir = TempDir::new().unwrap();
         let _storage_mutable = storage_mutable_in(&temp_dir).unwrap();
-        let lock_file = File::open(temp_dir.path().join("storage").join(".lock")).unwrap();
+        let lock_file = File::open(
+            temp_dir
+                .path()
+                .join("storage")
+                .join("locks")
+                .join("storage"),
+        )
+        .unwrap();
 
         lock_file.try_lock_shared().unwrap_err();
         lock_file.try_lock().unwrap_err();

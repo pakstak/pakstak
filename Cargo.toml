@@ -8,6 +8,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.0"
 http-auth = { version = "0.1", default-features = false }
+libc = "0.2"
 ring = "0.17"
 tar = "0.4"
 thiserror = "2.0"

@@ -1,4 +1,4 @@
-use crate::storage::StorageMutable;
+use crate::storage::{LayerLockResult, StorageMutable};
 use anyhow::Context as _;
 use std::collections::HashSet;
 
@@ -8,6 +8,7 @@ pub fn prune(storage: &StorageMutable) -> anyhow::Result<()> {
 
     let removed_manifests = prune_manifests(storage, &used_manifests)?;
     let removed_layers = prune_layers(storage, &used_layers)?;
+    cleanup_layer_locks(storage)?;
 
     eprintln!("pruned {removed_manifests} manifests and {removed_layers} layers");
 
@@ -71,9 +72,52 @@ fn prune_layers(storage: &StorageMutable, used_layers: &HashSet<String>) -> anyh
                 return Ok(removed);
             }
 
-            storage
-                .remove_layer(&layer_digest)
-                .with_context(|| format!("failed to prune layer {layer_digest}"))?;
-            Ok(removed + 1)
+            match storage.lock_layer_for_prune(&layer_digest) {
+                LayerLockResult::Acquired(layer_lock) => {
+                    if let Err(error) = storage
+                        .remove_layer(&layer_digest)
+                        .with_context(|| format!("failed to prune layer {layer_digest}"))
+                        .and_then(|_| layer_lock.remove_file())
+                    {
+                        eprintln!("failed to prune layer {layer_digest}: {error:#}");
+                        return Ok(removed);
+                    }
+                    Ok(removed + 1)
+                }
+                LayerLockResult::Failed => {
+                    eprintln!("failed to prune layer {layer_digest}: layer is locked");
+                    Ok(removed)
+                }
+                LayerLockResult::Error(error) => {
+                    eprintln!("failed to prune layer {layer_digest}: {error:#}");
+                    Ok(removed)
+                }
+            }
         })
+}
+
+fn cleanup_layer_locks(storage: &StorageMutable) -> anyhow::Result<()> {
+    for layer_digest in storage.read_layer_lock_digests()? {
+        let layer_digest = layer_digest.context("failed to read layer lock digest")?;
+        if storage.get_layer_path(&layer_digest).is_some() {
+            continue;
+        }
+
+        match storage.lock_layer_for_prune(&layer_digest) {
+            LayerLockResult::Acquired(layer_lock) => {
+                if let Err(error) = layer_lock
+                    .remove_file()
+                    .with_context(|| format!("failed to remove stale layer lock {layer_digest}"))
+                {
+                    eprintln!("failed to remove stale layer lock {layer_digest}: {error:#}");
+                }
+            }
+            LayerLockResult::Failed => {}
+            LayerLockResult::Error(error) => {
+                eprintln!("failed to remove stale layer lock {layer_digest}: {error:#}");
+            }
+        }
+    }
+
+    Ok(())
 }

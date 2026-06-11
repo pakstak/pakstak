@@ -404,6 +404,7 @@ dependencies = [
  "clap",
  "flate2",
  "http-auth",
+ "libc",
  "ring",
  "serde",
  "serde_json",
