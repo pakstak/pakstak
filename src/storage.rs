@@ -5,8 +5,9 @@ use crate::reference::Reference;
 use anyhow::Context as _;
 use flate2::read::GzDecoder;
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tar::Archive;
@@ -250,7 +251,7 @@ impl StorageMutable {
 
         // Clear temporary directory
         if storage.temporary_path.exists() {
-            fs::remove_dir_all(&storage.temporary_path).with_context(|| {
+            remove_dir_all_writable(&storage.temporary_path).with_context(|| {
                 format!(
                     "failed to remove temporary directory {}",
                     &storage.temporary_path.display()
@@ -452,7 +453,7 @@ impl StorageMutable {
         })?;
 
         if let Err(err) = extract_layer(reader, digest, &temporary_output_path) {
-            let _ = fs::remove_dir_all(&temporary_output_path);
+            let _ = remove_dir_all_writable(&temporary_output_path);
             return Err(err);
         }
 
@@ -533,7 +534,7 @@ impl StorageMutable {
     fn remove_directory(&self, path: &Path, kind: &str) -> anyhow::Result<()> {
         let temporary_path = self.storage.temporary_path_for(path)?;
         if temporary_path.exists() {
-            fs::remove_dir_all(&temporary_path).with_context(|| {
+            remove_dir_all_writable(&temporary_path).with_context(|| {
                 format!(
                     "failed to clear temporary {kind} directory {}",
                     temporary_path.display()
@@ -548,7 +549,7 @@ impl StorageMutable {
                 temporary_path.display()
             )
         })?;
-        fs::remove_dir_all(&temporary_path).with_context(|| {
+        remove_dir_all_writable(&temporary_path).with_context(|| {
             format!(
                 "failed to remove temporary {kind} directory {}",
                 temporary_path.display()
@@ -606,6 +607,60 @@ fn try_lock_layer_for_prune(file: &File) -> io::Result<()> {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
         return Err(error);
+    }
+
+    Ok(())
+}
+
+fn remove_dir_all_writable(path: &Path) -> anyhow::Result<()> {
+    make_tree_writable(path)?;
+    fs::remove_dir_all(path)
+        .with_context(|| format!("failed to recursively remove directory {}", path.display()))
+}
+
+fn make_tree_writable(path: &Path) -> anyhow::Result<()> {
+    let mut pending = vec![path.to_path_buf()];
+
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+
+        make_path_writable(&path, &metadata)?;
+
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        for entry in fs::read_dir(&path)
+            .with_context(|| format!("failed to read directory {}", path.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("failed to read directory entry under {}", path.display())
+            })?;
+            pending.push(entry.path());
+        }
+    }
+
+    Ok(())
+}
+
+fn make_path_writable(path: &Path, metadata: &Metadata) -> anyhow::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    let writable_mode = if metadata.is_dir() {
+        mode | 0o700
+    } else {
+        mode | 0o600
+    };
+
+    if writable_mode != mode {
+        permissions.set_mode(writable_mode);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to make path writable {}", path.display()))?;
     }
 
     Ok(())
@@ -710,6 +765,7 @@ fn extract_layer(
 pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::{fs::Permissions, os::unix::fs::symlink};
     use temp_dir::TempDir;
 
     // Lock for storage initialization.
@@ -737,6 +793,57 @@ pub(crate) mod tests {
             env::set_var("PAKSTAK_STORAGE_PATH", &storage_path);
         }
         StorageMutable::new()
+    }
+
+    #[test]
+    fn remove_dir_all_writable_removes_non_writable_tree() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("root");
+        let child_dir = root.join("child");
+        let child_file = child_dir.join("file");
+
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(&child_file, b"content").unwrap();
+        make_readonly(&child_file);
+        make_readonly(&child_dir);
+        make_readonly(&root);
+
+        remove_dir_all_writable(&root).unwrap();
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn remove_dir_all_writable_does_not_follow_symlinks() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("root");
+        let outside = temp_dir.path().join("outside");
+        let outside_file = outside.join("file");
+        let link = root.join("link");
+
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&outside_file, b"content").unwrap();
+        fs::set_permissions(&outside, Permissions::from_mode(0o500)).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        remove_dir_all_writable(&root).unwrap();
+
+        assert!(!root.exists());
+        assert!(outside.is_dir());
+        assert!(outside_file.is_file());
+        assert_eq!(
+            fs::symlink_metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+
+        fs::set_permissions(&outside, Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn make_readonly(path: &Path) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
