@@ -591,10 +591,15 @@ fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
 
 fn try_lock_layer_for_prune(file: &File) -> io::Result<()> {
     let lock = libc::flock {
+        // Request an exclusive/write lock.
         l_type: libc::F_WRLCK as libc::c_short,
+        // Interpret `l_start` from the start of the file.
         l_whence: libc::SEEK_SET as libc::c_short,
+        // Start locking at byte 0.
         l_start: 0,
+        // Lock from `l_start` through EOF.
         l_len: 0,
+        // Ignored by F_SETLK; only returned by F_GETLK conflict queries.
         l_pid: 0,
     };
 
@@ -603,6 +608,8 @@ fn try_lock_layer_for_prune(file: &File) -> io::Result<()> {
     let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) };
     if result == -1 {
         let error = io::Error::last_os_error();
+        // F_SETLK is non-blocking: if another process holds a conflicting
+        // lock, Linux may report either EACCES or EAGAIN, so both mean "locked".
         if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EAGAIN)) {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
