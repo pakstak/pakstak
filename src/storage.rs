@@ -5,7 +5,7 @@ use crate::reference::Reference;
 use anyhow::Context as _;
 use flate2::read::GzDecoder;
 use std::env;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd;
@@ -153,9 +153,7 @@ impl Storage {
 
     pub fn create_layer_lock_file(&self, digest: &str) -> anyhow::Result<PathBuf> {
         let lock_path = self.layer_lock_path(digest);
-        ensure_parent_dir(&lock_path)?;
-        File::create(&lock_path)
-            .with_context(|| format!("failed to create layer lock file {}", lock_path.display()))?;
+        open_lock_file(&lock_path)?;
         Ok(lock_path)
     }
 
@@ -308,13 +306,7 @@ impl StorageMutable {
 
     pub fn lock_layer_for_prune(&self, digest: &str) -> LayerLockResult {
         let lock_path = self.storage.layer_lock_path(digest);
-        if let Err(error) = ensure_parent_dir(&lock_path) {
-            return LayerLockResult::Error(error);
-        }
-
-        let file = match File::create(&lock_path)
-            .with_context(|| format!("failed to open layer lock file {}", lock_path.display()))
-        {
+        let file = match open_lock_file(&lock_path) {
             Ok(file) => file,
             Err(error) => return LayerLockResult::Error(error),
         };
@@ -589,6 +581,16 @@ fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn open_lock_file(path: &Path) -> anyhow::Result<File> {
+    ensure_parent_dir(path)?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open lock file {}", path.display()))
+}
+
 fn try_lock_layer_for_prune(file: &File) -> io::Result<()> {
     let lock = libc::flock {
         // Request an exclusive/write lock.
@@ -712,13 +714,10 @@ fn acquire_lock(storage_path: &Path, mode: LockMode) -> anyhow::Result<StorageLo
     })?;
 
     let lock_path = storage_path.join("locks").join("storage");
-    ensure_parent_dir(&lock_path)?;
-
+    let file = open_lock_file(&lock_path)?;
     // `locks/storage` serializes access to the storage directory. Readers hold a
     // shared lock, while mutating commands hold an exclusive lock so they cannot
     // publish partial state while another process is reading.
-    let file = File::create(&lock_path)
-        .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     match mode {
         LockMode::Shared => file.try_lock_shared(),
         LockMode::Exclusive => file.try_lock(),
@@ -869,6 +868,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn storage_lock_file_is_not_truncated_when_opened() {
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir
+            .path()
+            .join("storage")
+            .join("locks")
+            .join("storage");
+        ensure_parent_dir(&lock_path).unwrap();
+        fs::write(&lock_path, b"existing lock contents").unwrap();
+
+        let _storage = storage_in(&temp_dir).unwrap();
+
+        assert_eq!(fs::read(&lock_path).unwrap(), b"existing lock contents");
+    }
+
+    #[test]
     fn storage_holds_shared_lock_on_lock_file() {
         let temp_dir = TempDir::new().unwrap();
         let _storage = storage_in(&temp_dir).unwrap();
@@ -916,6 +931,52 @@ pub(crate) mod tests {
         let _storage_mutable = storage_mutable_in(&temp_dir).unwrap();
 
         storage_in(&temp_dir).unwrap_err();
+    }
+
+    #[test]
+    fn create_layer_lock_file_does_not_truncate_existing_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = storage_in(&temp_dir).unwrap();
+        let lock_path = temp_dir
+            .path()
+            .join("storage")
+            .join("locks")
+            .join("layers")
+            .join("sha256:layer");
+        ensure_parent_dir(&lock_path).unwrap();
+        fs::write(&lock_path, b"existing layer lock contents").unwrap();
+
+        storage.create_layer_lock_file("sha256:layer").unwrap();
+
+        assert_eq!(
+            fs::read(&lock_path).unwrap(),
+            b"existing layer lock contents"
+        );
+    }
+
+    #[test]
+    fn lock_layer_for_prune_does_not_truncate_existing_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_mutable = storage_mutable_in(&temp_dir).unwrap();
+        let lock_path = temp_dir
+            .path()
+            .join("storage")
+            .join("locks")
+            .join("layers")
+            .join("sha256:layer");
+        ensure_parent_dir(&lock_path).unwrap();
+        fs::write(&lock_path, b"existing layer lock contents").unwrap();
+
+        match storage_mutable.lock_layer_for_prune("sha256:layer") {
+            LayerLockResult::Acquired(_lock) => {}
+            LayerLockResult::Failed => panic!("failed to acquire an unlocked layer lock"),
+            LayerLockResult::Error(error) => panic!("unexpected error locking layer: {error:#}"),
+        }
+
+        assert_eq!(
+            fs::read(&lock_path).unwrap(),
+            b"existing layer lock contents"
+        );
     }
 
     #[test]
