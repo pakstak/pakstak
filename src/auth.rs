@@ -54,16 +54,18 @@ pub fn fetch_bearer_token(
         request = request.query("scope", scope);
     }
 
-    let token: TokenResponse = request
-        .call()
-        .with_context(|| {
-            format!(
-                "registry auth token request failed: GET {}",
-                challenge.realm
-            )
-        })?
-        .into_json()
-        .context("failed to parse registry auth token response")?;
+    let mut response = request.call().with_context(|| {
+        format!(
+            "registry auth token request failed: GET {}",
+            challenge.realm
+        )
+    })?;
+    let body = response
+        .body_mut()
+        .read_to_vec()
+        .context("failed to read registry auth token response")?;
+    let token: TokenResponse =
+        serde_json::from_slice(&body).context("failed to parse registry auth token response")?;
 
     token
         .token
@@ -71,16 +73,21 @@ pub fn fetch_bearer_token(
         .ok_or_else(|| anyhow!("registry auth token response did not include a token"))
 }
 
-pub fn auth_header_from_unauthorized(response: &ureq::Response) -> anyhow::Result<&str> {
+pub fn auth_header_from_unauthorized(
+    response: &ureq::http::Response<ureq::Body>,
+) -> anyhow::Result<&str> {
     response
-        .header("WWW-Authenticate")
-        .or_else(|| response.header("Www-Authenticate"))
-        .context("registry returned 401 without a WWW-Authenticate header")
+        .headers()
+        .get("WWW-Authenticate")
+        .or_else(|| response.headers().get("Www-Authenticate"))
+        .context("registry returned 401 without a WWW-Authenticate header")?
+        .to_str()
+        .context("registry returned an invalid WWW-Authenticate header")
 }
 
 pub fn token_from_unauthorized(
     agent: &ureq::Agent,
-    response: &ureq::Response,
+    response: &ureq::http::Response<ureq::Body>,
 ) -> anyhow::Result<String> {
     let header = auth_header_from_unauthorized(response)?;
     let challenge = parse_bearer_challenge(header)?;

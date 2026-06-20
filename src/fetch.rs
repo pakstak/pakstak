@@ -20,7 +20,7 @@ pub struct RegistryClient {
 struct ManifestBytes {
     bytes: Vec<u8>,
     digest: String,
-    media_type: Option<String>,
+    media_type: ManifestMediaType,
 }
 
 impl RegistryClient {
@@ -29,7 +29,7 @@ impl RegistryClient {
             registry,
             repository,
             token: None,
-            agent: ureq::AgentBuilder::new().build(),
+            agent: ureq::Agent::new_with_defaults(),
         })
     }
 
@@ -48,12 +48,12 @@ impl RegistryClient {
                     specifier.as_typeless_str()
                 )
             })?;
-        match fetched.media_type.as_deref().map(ManifestMediaType::parse) {
-            Some(ManifestMediaType::Index) => self.handle_image_index(&fetched, specifier),
-            Some(ManifestMediaType::Manifest) => {
+        match fetched.media_type {
+            ManifestMediaType::Index => self.handle_image_index(&fetched, specifier),
+            ManifestMediaType::Manifest => {
                 parse_image_manifest(fetched, specifier.as_typeless_str())
             }
-            Some(ManifestMediaType::Unsupported) | None => {
+            ManifestMediaType::Unknown => {
                 let index_error = match self.handle_image_index(&fetched, specifier) {
                     Ok(manifest) => return Ok(manifest),
                     Err(error) => error,
@@ -111,17 +111,20 @@ impl RegistryClient {
             specifier.as_typeless_str(),
         );
         let response = self
-            .call_with_auth_retry("GET", &url, |request| request.set("Accept", accept))
+            .call_get_with_auth_retry(&url, |request| request.header("Accept", accept))
             .with_context(|| format!("registry request failed: GET {url}"))?;
-        let media_type = response.header("Content-Type").map(str::to_string);
+        let media_type = ManifestMediaType::parse_header(response.headers().get("Content-Type"));
         let header_digest = response
-            .header("Docker-Content-Digest")
+            .headers()
+            .get("Docker-Content-Digest")
             .context("registry response did not include Docker-Content-Digest header")?
+            .to_str()
+            .context("registry returned an invalid Docker-Content-Digest header")?
             .to_string();
 
         let mut bytes = Vec::new();
-        response
-            .into_reader()
+        let (_, body) = response.into_parts();
+        body.into_reader()
             .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read manifest response body from {url}"))?;
         digest::verify_bytes(&bytes, &header_digest)
@@ -143,43 +146,51 @@ impl RegistryClient {
             self.registry, self.repository, digest
         );
         let response = self
-            .call_with_auth_retry("GET", &url, |request| request.set("Accept", LAYER_ACCEPT))
+            .call_get_with_auth_retry(&url, |request| request.header("Accept", LAYER_ACCEPT))
             .with_context(|| format!("registry request failed: GET {url}"))?;
 
-        Ok(BufReader::new(response.into_reader()))
+        let (_, body) = response.into_parts();
+        Ok(BufReader::new(body.into_reader()))
     }
 
-    fn call_with_auth_retry<F>(
+    fn call_get_with_auth_retry<F>(
         &mut self,
-        method: &str,
         url: &str,
         configure: F,
-    ) -> anyhow::Result<ureq::Response>
+    ) -> anyhow::Result<ureq::http::Response<ureq::Body>>
     where
-        F: Fn(ureq::Request) -> ureq::Request,
+        F: Fn(
+            ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+        ) -> ureq::RequestBuilder<ureq::typestate::WithoutBody>,
     {
-        match configure(self.request(method, url)).call() {
+        match configure(self.request_get(url)).call() {
             Ok(response) => Ok(response),
-            Err(ureq::Error::Status(401, response)) => {
-                let token =
-                    auth::token_from_unauthorized(&self.agent, &response).with_context(|| {
-                        format!("failed to authenticate registry request: {method} {url}")
-                    })?;
-                self.token = Some(token);
-                configure(self.request(method, url))
+            Err(ureq::Error::StatusCode(401)) => {
+                let unauthorized = configure(self.request_get(url))
+                    .config()
+                    .http_status_as_error(false)
+                    .build()
                     .call()
                     .with_context(|| {
-                        format!("authenticated registry request failed: {method} {url}")
-                    })
+                        format!("failed to fetch unauthorized registry response: GET {url}")
+                    })?;
+                let token = auth::token_from_unauthorized(&self.agent, &unauthorized)
+                    .with_context(|| {
+                        format!("failed to authenticate registry request: GET {url}")
+                    })?;
+                self.token = Some(token);
+                configure(self.request_get(url))
+                    .call()
+                    .with_context(|| format!("authenticated registry request failed: GET {url}"))
             }
             Err(error) => Err(error.into()),
         }
     }
 
-    fn request(&self, method: &str, url: &str) -> ureq::Request {
-        let request = self.agent.request(method, url);
+    fn request_get(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        let request = self.agent.get(url);
         match &self.token {
-            Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+            Some(token) => request.header("Authorization", format!("Bearer {token}")),
             None => request,
         }
     }
@@ -201,14 +212,26 @@ fn parse_image_manifest(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManifestMediaType {
     Index,
     Manifest,
-    Unsupported,
+    Unknown,
 }
 
 impl ManifestMediaType {
-    fn parse(media_type: &str) -> Self {
+    fn parse_header(header: Option<&ureq::http::HeaderValue>) -> Self {
+        let Some(header) = header else {
+            return Self::Unknown;
+        };
+        let media_type = match header.to_str() {
+            Ok(media_type) => media_type,
+            Err(error) => {
+                eprintln!("failed to parse manifest Content-Type header: {error}");
+                return Self::Unknown;
+            }
+        };
+
         media_type
             .split(';')
             .find_map(|s| match s.trim() {
@@ -218,7 +241,7 @@ impl ManifestMediaType {
             })
             .unwrap_or_else(|| {
                 eprintln!("unsupported manifest media type detected: `{media_type}`");
-                Self::Unsupported
+                Self::Unknown
             })
     }
 }

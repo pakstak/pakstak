@@ -781,7 +781,7 @@ pub(crate) mod tests {
     // and initializing the storage.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    pub(crate) fn storage_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<Storage> {
+    pub(crate) fn storage_in(storage_parent: impl AsRef<Path>) -> anyhow::Result<Storage> {
         let storage_path = storage_parent.as_ref().join("storage");
 
         let _guard = ENV_LOCK.lock().unwrap();
@@ -791,7 +791,7 @@ pub(crate) mod tests {
         Storage::new()
     }
 
-    fn storage_mutable_in(storage_parent: &impl AsRef<Path>) -> anyhow::Result<StorageMutable> {
+    fn storage_mutable_in(storage_parent: impl AsRef<Path>) -> anyhow::Result<StorageMutable> {
         let storage_path = storage_parent.as_ref().join("storage");
 
         let _guard = ENV_LOCK.lock().unwrap();
