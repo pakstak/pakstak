@@ -57,9 +57,18 @@ enum Command {
     Repair,
     /// Run a command inside installed image rootfs layers.
     Run {
-        /// Installed container names. Later containers are stacked above earlier containers.
-        /// If a layer exists in both containers it is only binded once.
-        #[arg(required = true)]
+        /// Installed container names.
+        #[arg(
+            required = true,
+            long_help = concat!(
+                "Installed container names.\n",
+                "Containers are stacked in the order provided, the latter on top of the former.\n",
+                "Stacking containers having common layers is not recommended.\n",
+                "If the same layer appears in multiple containers, it is used only once.\n\n",
+                "For exact overlay behavior, see: \
+                https://www.kernel.org/doc/html/latest/filesystems/overlayfs.html",
+            )
+        )]
         containers: Vec<String>,
         /// Command and arguments that are passed to the Bubblewrap.
         #[arg(required = true, last = true)]

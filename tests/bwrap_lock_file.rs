@@ -16,14 +16,7 @@ fn bwrap_lock_file_locks() {
     let lock_path = temp_dir.path().join("lock");
     File::create(&lock_path).unwrap();
 
-    let mut child = match spawn_bwrap_with_lock_file(&lock_path) {
-        Ok(child) => child,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!("skipping test because bwrap is unavailable");
-            return;
-        }
-        Err(error) => panic!("failed to spawn bwrap: {error}"),
-    };
+    let mut child = spawn_bwrap_with_lock_file(&lock_path).expect("failed to spawn bwrap");
 
     let lock_file = OpenOptions::new()
         .read(true)
