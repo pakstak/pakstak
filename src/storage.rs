@@ -1028,7 +1028,7 @@ pub(crate) mod tests {
         let Some(storage_parent) = env::var_os("PAKSTAK_FCNTL_LAYER_LOCK_TEST_STORAGE") else {
             return;
         };
-        let storage_mutable = storage_mutable_in(&PathBuf::from(storage_parent)).unwrap();
+        let storage_mutable = storage_mutable_in(PathBuf::from(storage_parent)).unwrap();
 
         match storage_mutable.lock_layer_for_prune("sha256:layer") {
             LayerLockResult::Failed => {}

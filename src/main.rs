@@ -55,10 +55,12 @@ enum Command {
     Prune,
     /// Repair installed containers and check cached manifests and layers.
     Repair,
-    /// Run a command inside an installed image rootfs.
+    /// Run a command inside installed image rootfs layers.
     Run {
-        /// Installed container name.
-        container: String,
+        /// Installed container names. Later containers are stacked above earlier containers.
+        /// If a layer exists in both containers it is only binded once.
+        #[arg(required = true)]
+        containers: Vec<String>,
         /// Command and arguments that are passed to the Bubblewrap.
         #[arg(required = true, last = true)]
         command: Vec<String>,
@@ -93,9 +95,12 @@ fn main() -> anyhow::Result<()> {
             let storage = StorageMutable::new().context("failed to initialize mutable storage")?;
             repair::repair(&storage)
         }
-        Command::Run { container, command } => {
+        Command::Run {
+            containers,
+            command,
+        } => {
             let storage = Storage::new().context("failed to initialize storage")?;
-            run::run(&storage, &container, command)
+            run::run(&storage, containers, command)
         }
     }
 }
