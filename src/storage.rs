@@ -5,8 +5,10 @@ use crate::reference::Reference;
 use anyhow::Context as _;
 use flate2::read::GzDecoder;
 use std::env;
+use std::ffi::{CString, OsStr};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -756,6 +758,13 @@ fn extract_layer(
                 })?;
         }
 
+        convert_oci_whiteouts_to_overlayfs(output_dir).with_context(|| {
+            format!(
+                "failed to convert OCI whiteouts in extracted layer {}",
+                output_dir.display()
+            )
+        })?;
+
         io::copy(&mut peekable, &mut io::sink())
             .context("failed to finish reading layer bytes for digest verification")?;
     }
@@ -763,6 +772,147 @@ fn extract_layer(
     verifier
         .verify()
         .with_context(|| format!("failed to verify layer digest {expected_digest}"))?;
+
+    Ok(())
+}
+
+fn convert_oci_whiteouts_to_overlayfs(output_dir: &Path) -> anyhow::Result<()> {
+    let mut pending = vec![output_dir.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .with_context(|| {
+                format!(
+                    "failed to read extracted layer directory {}",
+                    directory.display()
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| {
+                format!(
+                    "failed to read extracted layer entries under {}",
+                    directory.display()
+                )
+            })?;
+        let is_opaque = entries
+            .iter()
+            .any(|entry| entry.file_name() == OsStr::new(".wh..wh..opq"));
+
+        // OCI opaque markers hide all lower siblings in this directory.
+        if is_opaque {
+            set_overlay_xattr(&directory, "user.overlay.opaque", b"y")?;
+        }
+
+        for entry in entries {
+            let path = entry.path();
+            let file_name = entry.file_name();
+
+            if file_name == OsStr::new(".wh..wh..opq") {
+                remove_oci_whiteout_marker(&path)?;
+                continue;
+            }
+
+            if let Some(target_name) = oci_whiteout_target_name(&file_name) {
+                if is_opaque {
+                    // Per-file whiteouts are redundant inside an opaque directory.
+                    remove_oci_whiteout_marker(&path)?;
+                } else {
+                    convert_oci_whiteout_marker(&path, &directory.join(Path::new(target_name)))?;
+                }
+                continue;
+            }
+
+            let metadata = fs::symlink_metadata(&path).with_context(|| {
+                format!("failed to inspect extracted layer path {}", path.display())
+            })?;
+            if metadata.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn convert_oci_whiteout_marker(marker_path: &Path, target_path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(target_path) {
+        // Recreated directories must be opaque, otherwise overlayfs would merge lower entries.
+        Ok(metadata) if metadata.is_dir() => {
+            set_overlay_xattr(target_path, "user.overlay.opaque", b"y")?;
+        }
+        // Recreated files/symlinks already hide the lower target by existing at the same path.
+        Ok(_) => {}
+        // Missing targets need an explicit overlayfs whiteout to hide lower-layer content.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            File::create_new(target_path).with_context(|| {
+                format!(
+                    "failed to create overlayfs whiteout target {}",
+                    target_path.display()
+                )
+            })?;
+            set_overlay_xattr(target_path, "user.overlay.whiteout", b"y")?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect OCI whiteout target {}",
+                    target_path.display()
+                )
+            });
+        }
+    }
+
+    remove_oci_whiteout_marker(marker_path)
+}
+
+fn remove_oci_whiteout_marker(marker_path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(marker_path).with_context(|| {
+        format!(
+            "failed to read metadata for OCI whiteout marker {}",
+            marker_path.display()
+        )
+    })?;
+    make_path_writable(marker_path, &metadata)?;
+
+    fs::remove_file(marker_path).with_context(|| {
+        format!(
+            "failed to remove OCI whiteout marker {}",
+            marker_path.display()
+        )
+    })
+}
+
+fn oci_whiteout_target_name(file_name: &OsStr) -> Option<&OsStr> {
+    let bytes = file_name.as_bytes();
+    bytes
+        .strip_prefix(b".wh.")
+        .filter(|target| !target.is_empty())
+        .map(OsStr::from_bytes)
+}
+
+fn set_overlay_xattr(path: &Path, name: &str, value: &[u8]) -> anyhow::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes()).with_context(|| {
+        format!(
+            "failed to prepare path {} for overlay xattr {name}",
+            path.display()
+        )
+    })?;
+    let name = CString::new(name).context("failed to prepare overlay xattr name")?;
+
+    let result = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+
+    if result == -1 {
+        return Err(io::Error::last_os_error())
+            .context("failed to set overlay xattr; filesystem may not support user xattrs");
+    }
 
     Ok(())
 }
@@ -850,6 +1000,123 @@ pub(crate) mod tests {
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_readonly(true);
         fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn converts_missing_oci_whiteout_to_overlayfs_whiteout() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join(".wh.deleted"), b"").unwrap();
+
+        convert_oci_whiteouts_to_overlayfs(root).unwrap();
+
+        assert!(!root.join(".wh.deleted").exists());
+        assert_eq!(fs::read(root.join("deleted")).unwrap(), b"");
+        assert_eq!(
+            get_xattr(&root.join("deleted"), "user.overlay.whiteout"),
+            Some(b"y".to_vec())
+        );
+    }
+
+    #[test]
+    fn removes_oci_whiteout_when_same_layer_file_replaces_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join(".wh.file"), b"").unwrap();
+        fs::write(root.join("file"), b"replacement").unwrap();
+
+        convert_oci_whiteouts_to_overlayfs(root).unwrap();
+
+        assert!(!root.join(".wh.file").exists());
+        assert_eq!(fs::read(root.join("file")).unwrap(), b"replacement");
+        assert_eq!(get_xattr(&root.join("file"), "user.overlay.whiteout"), None);
+    }
+
+    #[test]
+    fn marks_same_layer_directory_target_opaque() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let directory = root.join("directory");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(root.join(".wh.directory"), b"").unwrap();
+        fs::write(directory.join("new"), b"content").unwrap();
+
+        convert_oci_whiteouts_to_overlayfs(root).unwrap();
+
+        assert!(!root.join(".wh.directory").exists());
+        assert_eq!(fs::read(directory.join("new")).unwrap(), b"content");
+        assert_eq!(
+            get_xattr(&directory, "user.overlay.opaque"),
+            Some(b"y".to_vec())
+        );
+    }
+
+    #[test]
+    fn converts_oci_opaque_marker_to_overlayfs_opaque_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let directory = root.join("etc");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(".wh..wh..opq"), b"").unwrap();
+        fs::write(directory.join("hosts"), b"127.0.0.1 localhost").unwrap();
+
+        convert_oci_whiteouts_to_overlayfs(root).unwrap();
+
+        assert!(!directory.join(".wh..wh..opq").exists());
+        assert_eq!(
+            get_xattr(&directory, "user.overlay.opaque"),
+            Some(b"y".to_vec())
+        );
+        assert_eq!(
+            fs::read(directory.join("hosts")).unwrap(),
+            b"127.0.0.1 localhost"
+        );
+    }
+
+    #[test]
+    fn removes_redundant_whiteout_inside_opaque_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let directory = root.join("etc");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(".wh..wh..opq"), b"").unwrap();
+        fs::write(directory.join(".wh.hosts"), b"").unwrap();
+
+        convert_oci_whiteouts_to_overlayfs(root).unwrap();
+
+        assert!(!directory.join(".wh..wh..opq").exists());
+        assert!(!directory.join(".wh.hosts").exists());
+        assert!(!directory.join("hosts").exists());
+        assert_eq!(
+            get_xattr(&directory, "user.overlay.opaque"),
+            Some(b"y".to_vec())
+        );
+    }
+
+    fn get_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+        let display_path = path.display().to_string();
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let xattr_name = CString::new(name).unwrap();
+        let mut value = vec![0; 128];
+        let result = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                xattr_name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENODATA | libc::ENOTSUP)) {
+                return None;
+            }
+            panic!("failed to get xattr {name} from {display_path}: {error}");
+        }
+
+        value.truncate(result as usize);
+        Some(value)
     }
 
     #[test]
