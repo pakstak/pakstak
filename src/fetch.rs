@@ -5,6 +5,8 @@ use crate::reference::{Reference, Specifier};
 use crate::storage::StorageMutable;
 use anyhow::{Context as _, bail};
 use std::io::{BufReader, Read};
+use std::sync::Arc;
+use ureq::tls::{RootCerts, TlsConfig};
 
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -29,7 +31,17 @@ impl RegistryClient {
             registry,
             repository,
             token: None,
-            agent: ureq::Agent::new_with_defaults(),
+            agent: ureq::Agent::config_builder()
+                .tls_config(
+                    TlsConfig::builder()
+                        .root_certs(RootCerts::PlatformVerifier)
+                        .unversioned_rustls_crypto_provider(Arc::new(
+                            rustls::crypto::ring::default_provider(),
+                        ))
+                        .build(),
+                )
+                .build()
+                .new_agent(),
         })
     }
 
