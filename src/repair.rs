@@ -1,11 +1,13 @@
 use crate::digest;
-use crate::fetch::fetch_image;
+use crate::fetch::RegistryClient;
 use crate::manifest::ImageManifest;
 use crate::reference::Specifier;
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 
 pub fn repair(storage: &StorageMutable) -> anyhow::Result<()> {
+    let mut client = RegistryClient::new();
+
     for container in storage.read_containers()? {
         let container = container.context("failed to read installed container name")?;
         let manifest_digest = storage
@@ -17,9 +19,11 @@ pub fn repair(storage: &StorageMutable) -> anyhow::Result<()> {
             .read_container_reference(&container)
             .with_context(|| format!("failed to read reference for container `{container}`"))?;
         reference.specifier = Specifier::Digest(manifest_digest);
-        fetch_image(storage, &reference, true).with_context(|| {
-            format!("failed to repair container `{container}` from {reference}")
-        })?;
+        client
+            .fetch_image(storage, &reference, true)
+            .with_context(|| {
+                format!("failed to repair container `{container}` from {reference}")
+            })?;
     }
 
     let mut invalid_manifests = 0;

@@ -1,4 +1,4 @@
-use crate::fetch::fetch_image;
+use crate::fetch::RegistryClient;
 use crate::storage::StorageMutable;
 use anyhow::Context as _;
 use std::collections::HashSet;
@@ -12,13 +12,17 @@ pub fn update(storage: &StorageMutable, containers: Vec<String>) -> anyhow::Resu
         }
     }
 
+    let mut client = RegistryClient::new();
+
     for container in containers {
         storage.ensure_container_installed(&container)?;
 
         let reference = storage.read_container_reference(&container)?;
-        let fetched_manifest = fetch_image(storage, &reference, false).with_context(|| {
-            format!("failed to update container `{container}` from {reference}")
-        })?;
+        let fetched_manifest = client
+            .fetch_image(storage, &reference, false)
+            .with_context(|| {
+                format!("failed to update container `{container}` from {reference}")
+            })?;
 
         let current_manifest = storage.read_container_manifest_digest(&container)?;
         if current_manifest == fetched_manifest.digest {
