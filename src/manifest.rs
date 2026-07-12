@@ -18,6 +18,7 @@ pub struct ImageIndex {
 #[serde(rename_all = "camelCase")]
 pub struct Descriptor {
     pub digest: String,
+    pub media_type: String,
     pub platform: Option<Platform>,
 }
 

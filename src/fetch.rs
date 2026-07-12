@@ -9,11 +9,18 @@ use std::io::{BufReader, Read};
 use std::sync::Arc;
 use ureq::tls::{RootCerts, TlsConfig};
 
-const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
-const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
-const IMAGE_ACCEPT: &str =
-    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json";
-const LAYER_ACCEPT: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
+const MANIFEST_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+];
+const INDEX_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+];
+const LAYER_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+];
 
 pub struct RegistryClient {
     tokens: HashMap<String, String>,
@@ -75,26 +82,19 @@ impl RegistryClient {
     }
 
     fn fetch_image_manifest(&mut self, reference: &Reference) -> anyhow::Result<FetchedManifest> {
+        let media_types = [INDEX_MEDIA_TYPES, MANIFEST_MEDIA_TYPES].concat();
         let fetched = self
-            .fetch_manifest_bytes(reference, IMAGE_ACCEPT)
+            .fetch_manifest_bytes(reference, &media_types)
             .context("failed to fetch manifest bytes")?;
         match fetched.media_type {
             ManifestMediaType::Index => self
                 .handle_image_index(reference, &fetched)
                 .context("failed to handle image index"),
             ManifestMediaType::Manifest => fetched.parse().context("failed to parse manifest"),
-            ManifestMediaType::Unknown => {
-                let index_error = match self.handle_image_index(reference, &fetched) {
-                    Ok(manifest) => return Ok(manifest),
-                    Err(error) => error,
-                };
-                fetched.parse().with_context(|| {
-                    format!(
-                        "failed to parse as image manifest after \
-                            fallback index parse failed: {index_error}"
-                    )
-                })
-            }
+            ManifestMediaType::Unknown => fetched
+                .parse()
+                .or_else(|_| self.handle_image_index(reference, &fetched))
+                .context("failed to parse as manifest and failed to handle as index"),
         }
     }
 
@@ -116,7 +116,7 @@ impl RegistryClient {
         let mut manifest_reference = reference.clone();
         manifest_reference.specifier = Specifier::Digest(descriptor_digest.to_owned());
 
-        self.fetch_manifest_bytes(&manifest_reference, OCI_IMAGE_MANIFEST_MEDIA_TYPE)
+        self.fetch_manifest_bytes(&manifest_reference, MANIFEST_MEDIA_TYPES)
             .with_context(|| format!("failed to fetch selected manifest {descriptor_digest}"))?
             .parse()
             .with_context(|| format!("failed to parse selected manifest {descriptor_digest}"))
@@ -125,8 +125,9 @@ impl RegistryClient {
     fn fetch_manifest_bytes(
         &mut self,
         reference: &Reference,
-        accept: &str,
+        accepted_media_types: &[&str],
     ) -> anyhow::Result<ManifestBytes> {
+        let accept = accepted_media_types.join(", ");
         let specifier = &reference.specifier;
         let path = format!(
             "/v2/{}/manifests/{}",
@@ -135,10 +136,10 @@ impl RegistryClient {
         );
         let response = self
             .call_get_with_auth_retry(&reference.registry, &path, |request| {
-                request.header("Accept", accept)
+                request.header("Accept", accept.as_str())
             })
             .with_context(|| format!("registry request failed: GET {path}"))?;
-        let media_type = ManifestMediaType::parse_header(response.headers().get("Content-Type"));
+        let media_type = ManifestMediaType::parse_headers(response.headers());
         let header_digest = response
             .headers()
             .get("Docker-Content-Digest")
@@ -165,12 +166,16 @@ impl RegistryClient {
         })
     }
 
-    fn fetch_blob_reader(&mut self, reference: &Reference) -> anyhow::Result<impl Read> {
+    fn fetch_blob_reader(
+        &mut self,
+        reference: &Reference,
+        accept: &str,
+    ) -> anyhow::Result<impl Read> {
         let digest = reference.specifier.as_typeless_str();
         let path = format!("/v2/{}/blobs/{digest}", reference.repository);
         let response = self
             .call_get_with_auth_retry(&reference.registry, &path, |request| {
-                request.header("Accept", LAYER_ACCEPT)
+                request.header("Accept", accept)
             })
             .with_context(|| format!("registry request failed: GET {path}"))?;
 
@@ -240,6 +245,15 @@ impl RegistryClient {
         let mut layer_reference = reference.clone();
 
         for layer in &fetched_manifest.manifest.layers {
+            if !LAYER_MEDIA_TYPES.contains(&layer.media_type.as_str()) {
+                bail!(
+                    "unsupported layer media type `{}` \
+                    for manifest manifest layer {}",
+                    layer.media_type,
+                    layer.digest,
+                );
+            }
+
             if storage.get_layer_path(&layer.digest).is_some() {
                 eprintln!("layer {} already extracted", layer.digest);
                 continue;
@@ -248,7 +262,7 @@ impl RegistryClient {
             layer_reference.specifier = Specifier::Digest(layer.digest.clone());
 
             let reader = self
-                .fetch_blob_reader(&layer_reference)
+                .fetch_blob_reader(&layer_reference, &layer.media_type)
                 .with_context(|| format!("failed to fetch layer {}", layer.digest))?;
 
             storage
@@ -273,7 +287,7 @@ struct ManifestBytes {
 }
 
 impl ManifestBytes {
-    fn parse(self) -> anyhow::Result<FetchedManifest> {
+    fn parse(&self) -> anyhow::Result<FetchedManifest> {
         let manifest: ImageManifest =
             serde_json::from_slice(&self.bytes).context("parsing failed")?;
         if manifest.schema_version != 2 {
@@ -281,8 +295,8 @@ impl ManifestBytes {
         }
         Ok(FetchedManifest {
             manifest,
-            bytes: self.bytes,
-            digest: self.digest,
+            bytes: self.bytes.clone(),
+            digest: self.digest.clone(),
         })
     }
 }
@@ -295,28 +309,23 @@ enum ManifestMediaType {
 }
 
 impl ManifestMediaType {
-    fn parse_header(header: Option<&ureq::http::HeaderValue>) -> Self {
-        let Some(header) = header else {
+    fn parse_headers(headers: &ureq::http::HeaderMap) -> Self {
+        let Some(header) = headers.get("Content-Type") else {
             return Self::Unknown;
         };
-        let media_type = match header.to_str() {
-            Ok(media_type) => media_type,
-            Err(error) => {
-                eprintln!("failed to parse manifest Content-Type header: {error}");
-                return Self::Unknown;
-            }
+
+        let Ok(media_type) = header.to_str() else {
+            return Self::Unknown;
         };
 
-        media_type
-            .split(';')
-            .find_map(|s| match s.trim() {
-                OCI_IMAGE_INDEX_MEDIA_TYPE => Some(Self::Index),
-                OCI_IMAGE_MANIFEST_MEDIA_TYPE => Some(Self::Manifest),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                eprintln!("unsupported manifest media type detected: `{media_type}`");
-                Self::Unknown
-            })
+        if INDEX_MEDIA_TYPES.iter().any(|t| media_type.contains(t)) {
+            return Self::Index;
+        }
+
+        if MANIFEST_MEDIA_TYPES.iter().any(|t| media_type.contains(t)) {
+            return Self::Manifest;
+        }
+
+        Self::Unknown
     }
 }
