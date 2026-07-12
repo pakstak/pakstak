@@ -237,7 +237,11 @@ mod tests {
 
         let layers = layer_digests
             .iter()
-            .map(|digest| format!("{{\"digest\":\"{digest}\"}}"))
+            .map(|digest| {
+                format!(
+                    "{{\"digest\":\"{digest}\",\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"}}"
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         fs::write(

@@ -17,10 +17,42 @@ const INDEX_MEDIA_TYPES: &[&str] = &[
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json",
 ];
-const LAYER_MEDIA_TYPES: &[&str] = &[
-    "application/vnd.oci.image.layer.v1.tar+gzip",
-    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+const LAYER_MEDIA_TYPES: &[(&str, LayerFormat)] = &[
+    (
+        "application/vnd.oci.image.layer.v1.tar+zstd",
+        LayerFormat::Zstd,
+    ),
+    (
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        LayerFormat::Gzip,
+    ),
+    (
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        LayerFormat::Gzip,
+    ),
+    ("application/vnd.oci.image.layer.v1.tar", LayerFormat::Tar),
+    (
+        "application/vnd.docker.image.rootfs.diff.tar",
+        LayerFormat::Tar,
+    ),
 ];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LayerFormat {
+    Tar,
+    Gzip,
+    Zstd,
+}
+
+impl LayerFormat {
+    fn from_media_type(media_type: &str) -> Option<Self> {
+        LAYER_MEDIA_TYPES
+            .iter()
+            .find_map(|(layer_media_type, format)| {
+                (*layer_media_type == media_type).then_some(*format)
+            })
+    }
+}
 
 pub struct RegistryClient {
     tokens: HashMap<String, String>,
@@ -245,14 +277,14 @@ impl RegistryClient {
         let mut layer_reference = reference.clone();
 
         for layer in &fetched_manifest.manifest.layers {
-            if !LAYER_MEDIA_TYPES.contains(&layer.media_type.as_str()) {
-                bail!(
-                    "unsupported layer media type `{}` \
+            let layer_format =
+                LayerFormat::from_media_type(&layer.media_type).with_context(|| {
+                    format!(
+                        "unsupported layer media type `{}` \
                     for manifest manifest layer {}",
-                    layer.media_type,
-                    layer.digest,
-                );
-            }
+                        layer.media_type, layer.digest,
+                    )
+                })?;
 
             if storage.get_layer_path(&layer.digest).is_some() {
                 eprintln!("layer {} already extracted", layer.digest);
@@ -266,7 +298,7 @@ impl RegistryClient {
                 .with_context(|| format!("failed to fetch layer {}", layer.digest))?;
 
             storage
-                .write_layer(&layer.digest, reader)
+                .write_layer(&layer.digest, layer_format, reader)
                 .with_context(|| format!("failed to fetch and extract layer {}", layer.digest))?;
 
             eprintln!("extracted {}", layer.digest);

@@ -1,5 +1,6 @@
 use crate::digest;
 use crate::digest::DigestVerifier;
+use crate::fetch::LayerFormat;
 use crate::manifest::ImageManifest;
 use crate::reference::Reference;
 use anyhow::Context as _;
@@ -7,7 +8,7 @@ use flate2::read::GzDecoder;
 use std::env;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd;
@@ -436,7 +437,12 @@ impl StorageMutable {
             .with_context(|| format!("failed to remove layer {digest}"))
     }
 
-    pub fn write_layer(&self, digest: &str, reader: impl Read) -> anyhow::Result<()> {
+    pub fn write_layer(
+        &self,
+        digest: &str,
+        format: LayerFormat,
+        reader: impl Read,
+    ) -> anyhow::Result<()> {
         let output_path = self.storage.layer_path(digest);
         let temporary_output_path = self.storage.temporary_path_for(&output_path)?;
         fs::create_dir_all(&temporary_output_path).with_context(|| {
@@ -446,7 +452,7 @@ impl StorageMutable {
             )
         })?;
 
-        if let Err(err) = extract_layer(reader, digest, &temporary_output_path) {
+        if let Err(err) = extract_layer(reader, digest, format, &temporary_output_path) {
             let _ = remove_dir_all_writable(&temporary_output_path);
             return Err(err);
         }
@@ -732,6 +738,7 @@ fn acquire_lock(storage_path: &Path, mode: LockMode) -> anyhow::Result<StorageLo
 fn extract_layer(
     reader: impl Read,
     expected_digest: &str,
+    format: LayerFormat,
     output_dir: &Path,
 ) -> anyhow::Result<()> {
     let mut verifier = DigestVerifier::new(reader, expected_digest).with_context(|| {
@@ -740,22 +747,28 @@ fn extract_layer(
 
     {
         let mut peekable = BufReader::new(&mut verifier);
-        let buffer = peekable
-            .fill_buf()
-            .context("failed to inspect layer bytes")?;
-        let is_gzip = buffer.starts_with(&[0x1f, 0x8b]);
 
-        if is_gzip {
-            let decoder = GzDecoder::new(&mut peekable);
-            Archive::new(decoder).unpack(output_dir).with_context(|| {
-                format!("failed to unpack gzip layer into {}", output_dir.display())
-            })?;
-        } else {
-            Archive::new(&mut peekable)
-                .unpack(output_dir)
-                .with_context(|| {
-                    format!("failed to unpack tar layer into {}", output_dir.display())
+        match format {
+            LayerFormat::Tar => {
+                Archive::new(&mut peekable)
+                    .unpack(output_dir)
+                    .with_context(|| {
+                        format!("failed to unpack tar layer into {}", output_dir.display())
+                    })?;
+            }
+            LayerFormat::Gzip => {
+                let decoder = GzDecoder::new(&mut peekable);
+                Archive::new(decoder).unpack(output_dir).with_context(|| {
+                    format!("failed to unpack gzip layer into {}", output_dir.display())
                 })?;
+            }
+            LayerFormat::Zstd => {
+                let decoder = zstd::stream::read::Decoder::new(&mut peekable)
+                    .context("failed to initialize zstd layer decoder")?;
+                Archive::new(decoder).unpack(output_dir).with_context(|| {
+                    format!("failed to unpack zstd layer into {}", output_dir.display())
+                })?;
+            }
         }
 
         convert_oci_whiteouts_to_overlayfs(output_dir).with_context(|| {
