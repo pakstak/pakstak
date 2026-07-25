@@ -17,26 +17,6 @@ const INDEX_MEDIA_TYPES: &[&str] = &[
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json",
 ];
-const LAYER_MEDIA_TYPES: &[(&str, LayerFormat)] = &[
-    (
-        "application/vnd.oci.image.layer.v1.tar+zstd",
-        LayerFormat::Zstd,
-    ),
-    (
-        "application/vnd.oci.image.layer.v1.tar+gzip",
-        LayerFormat::Gzip,
-    ),
-    (
-        "application/vnd.docker.image.rootfs.diff.tar.gzip",
-        LayerFormat::Gzip,
-    ),
-    ("application/vnd.oci.image.layer.v1.tar", LayerFormat::Tar),
-    (
-        "application/vnd.docker.image.rootfs.diff.tar",
-        LayerFormat::Tar,
-    ),
-];
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LayerFormat {
     Tar,
@@ -44,13 +24,22 @@ pub(crate) enum LayerFormat {
     Zstd,
 }
 
-impl LayerFormat {
-    fn from_media_type(media_type: &str) -> Option<Self> {
-        LAYER_MEDIA_TYPES
-            .iter()
-            .find_map(|(layer_media_type, format)| {
-                (*layer_media_type == media_type).then_some(*format)
-            })
+#[derive(Debug, thiserror::Error)]
+#[error("unsupported layer media type `{0}`")]
+pub(crate) struct UnsupportedLayerMediaType(String);
+
+impl TryFrom<&str> for LayerFormat {
+    type Error = UnsupportedLayerMediaType;
+
+    fn try_from(media_type: &str) -> Result<Self, Self::Error> {
+        match media_type {
+            "application/vnd.oci.image.layer.v1.tar+zstd" => Ok(Self::Zstd),
+            "application/vnd.oci.image.layer.v1.tar+gzip"
+            | "application/vnd.docker.image.rootfs.diff.tar.gzip" => Ok(Self::Gzip),
+            "application/vnd.oci.image.layer.v1.tar"
+            | "application/vnd.docker.image.rootfs.diff.tar" => Ok(Self::Tar),
+            _ => Err(UnsupportedLayerMediaType(media_type.to_owned())),
+        }
     }
 }
 
@@ -277,14 +266,8 @@ impl RegistryClient {
         let mut layer_reference = reference.clone();
 
         for layer in &fetched_manifest.manifest.layers {
-            let layer_format =
-                LayerFormat::from_media_type(&layer.media_type).with_context(|| {
-                    format!(
-                        "unsupported layer media type `{}` \
-                    for manifest manifest layer {}",
-                        layer.media_type, layer.digest,
-                    )
-                })?;
+            let layer_format = LayerFormat::try_from(layer.media_type.as_str())
+                .with_context(|| format!("for manifest layer {}", layer.digest))?;
 
             if storage.get_layer_path(&layer.digest).is_some() {
                 eprintln!("layer {} already extracted", layer.digest);
