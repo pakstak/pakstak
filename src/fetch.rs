@@ -66,6 +66,24 @@ impl RegistryClient {
         }
     }
 
+    #[cfg(test)]
+    fn new_for_test(root_cert: ureq::tls::Certificate<'static>) -> Self {
+        Self {
+            tokens: HashMap::new(),
+            agent: ureq::Agent::config_builder()
+                .tls_config(
+                    TlsConfig::builder()
+                        .root_certs(RootCerts::new_with_certs(&[root_cert]))
+                        .unversioned_rustls_crypto_provider(Arc::new(
+                            rustls::crypto::ring::default_provider(),
+                        ))
+                        .build(),
+                )
+                .build()
+                .new_agent(),
+        }
+    }
+
     pub fn fetch_image(
         &mut self,
         storage: &StorageMutable,
@@ -294,6 +312,11 @@ impl RegistryClient {
 fn registry_url(registry: &str, path: &str) -> String {
     format!("https://{registry}{path}")
 }
+
+#[cfg(test)]
+mod test_server;
+#[cfg(test)]
+mod tests;
 
 struct ManifestBytes {
     bytes: Vec<u8>,

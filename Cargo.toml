@@ -19,5 +19,7 @@ serde_json = "1.0"
 zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 temp-dir = "0.2"
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }
 
