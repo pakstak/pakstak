@@ -1,21 +1,22 @@
 # Pakstak
 
-Pakstak is an experiment in "containers for applications" and "universal packaging".
+Pakstak is a simple unprivileged local container manager and an experiment in "containers for applications" and "universal packaging".
 
-It is inspired by Flatpak-style application isolation, but aims to be much simpler and to build on the shoulders of giants: OCI and Bubblewrap.
+Instead of defining new repository and package formats, it is built around the OCI ecosystem and tools.
+
+Bubblewrap is used to stack layers/images and provide an isolated environment for the app.
 
 ## Goals
 
 - Work on any Linux distribution that has non-setuid Bubblewrap
 - Reasonable and customizable isolation
-- Require no special privileges (rootless)
+- Require no special privileges (be rootless)
 - Well-supported backing format (OCI images)
 - Few runtime and build-time dependencies
 - Simplicity, as in "easy to understand how it works", not as in "easy to use"
 
 ## Non-Goals
 
-- Replacing Flatpak
 - Integrating with non-universally available software
 - Providing a custom image format and/or tools for building container images
 - Feature completeness
@@ -29,7 +30,8 @@ If compiled statically:
 
 If the build is not static, additionally:
 
-- Libc
+- libc
+- libgcc and/or other C toolchain dependencies
 
 ## Basic Usage
 
@@ -45,8 +47,21 @@ Run a command from an installed container:
 pakstak run my_alpine -- /bin/sh
 ```
 
-Note that arguments after the first `--` are passed as-is to Bubblewrap, so
-you can define your own bindings and other sandbox parameters, for example:
+Pakstak uses OCI images but does not apply image configuration such as
+`ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, or `USER`. Specify the command and any required
+environment or working-directory options explicitly.
+
+Provided by default:
+
+- a read-only root filesystem view based on the images
+- cleared environment variables
+- isolated namespaces (including the network)
+- fresh `/proc`, `/dev`, and `/tmp` mounts
+
+Host files and networking must be enabled explicitly with Bubblewrap options.
+
+Arguments after the first `--` are passed as-is to Bubblewrap, so you can define your own
+bindings and other sandbox parameters, for example:
 
 ```sh
 pakstak run my_alpine -- --share-net --bind "$HOME" /mnt -- /bin/sh
@@ -63,7 +78,7 @@ which is configurable through the `PAKSTAK_STORAGE_PATH` environment variable.
 
 ## Image Sources
 
-You can use any public OCI-compliant container registry and build images with
+Works with most public OCI-compliant container registries and images built with
 standard tools such as Docker, Podman, or Buildah.
 There is also [Pakstash](https://github.com/pakstash/collection), a collection of images
 for desktop apps compatible with Pakstak. Contributions are welcome.
