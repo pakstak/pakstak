@@ -21,6 +21,10 @@ Bubblewrap is used to stack layers/images and provide an isolated environment fo
 - Providing a custom image format and/or tools for building container images
 - Feature completeness
 
+## Status
+
+This is experimental software. Expect breaking changes.
+
 ## Runtime Dependencies
 
 If compiled statically:
@@ -73,8 +77,9 @@ Update:
 pakstak update
 ```
 
-Currently, it only uses per-user storage: `$HOME/.var/pakstak`,
-which is configurable through the `PAKSTAK_STORAGE_PATH` environment variable.
+Pakstak uses per-user storage. The `PAKSTAK_STORAGE_PATH` environment variable
+can override its location; otherwise it uses `$XDG_DATA_HOME/pakstak`, falling
+back to `$HOME/.local/share/pakstak` when `XDG_DATA_HOME` is unset or empty.
 
 ## Image Sources
 

@@ -16,14 +16,20 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 
 fn storage_path_from_env() -> anyhow::Result<PathBuf> {
-    if let Some(storage_path) = env::var_os("PAKSTAK_STORAGE_PATH") {
+    if let Some(storage_path) = env::var_os("PAKSTAK_STORAGE_PATH").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(storage_path));
     }
 
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(data_home).join("pakstak"));
+    }
+
     let home_dir = env::var_os("HOME")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-    Ok(home_dir.join(".var").join("pakstak"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set or empty"))?;
+
+    Ok(home_dir.join(".local").join("share").join("pakstak"))
 }
 
 #[derive(Debug)]
