@@ -239,7 +239,7 @@ mod tests {
             .iter()
             .map(|digest| {
                 format!(
-                    "{{\"digest\":\"{digest}\",\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"}}"
+                    "{{\"digest\":\"{digest}\",\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"size\":0}}"
                 )
             })
             .collect::<Vec<_>>()

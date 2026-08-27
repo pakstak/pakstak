@@ -157,7 +157,7 @@ mod tests {
                 "{{\"schemaVersion\":2,\"layers\":[{}]}}",
                 ACTIVE_LAYERS
                     .map(|digest| format!(
-                        "{{\"digest\":\"{digest}\",\"mediaType\":\"application/vnd.oci.image.layer.v1.tar\"}}"
+                        "{{\"digest\":\"{digest}\",\"mediaType\":\"application/vnd.oci.image.layer.v1.tar\",\"size\":0}}"
                     ))
                     .join(",")
             ),

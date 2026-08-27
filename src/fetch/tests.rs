@@ -15,7 +15,7 @@ const TAR_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 fn manifest_and_layer() {
     let layer = tar_layer(&[("hello.txt", b"hello")]);
     let layer_digest = sha256_digest(&layer);
-    let manifest = image_manifest(&[(&layer_digest, TAR_LAYER_MEDIA_TYPE)]);
+    let manifest = image_manifest(&[(&layer_digest, TAR_LAYER_MEDIA_TYPE, layer.len() as u64)]);
     let manifest_digest = sha256_digest(&manifest);
 
     let mut server = MockServer::new();
@@ -126,7 +126,7 @@ fn layer_digest_mismatch() {
 }
 
 fn failed_layer(layer: Vec<u8>, expected_digest: &str, check_error: impl FnOnce(&anyhow::Error)) {
-    let manifest = image_manifest(&[(expected_digest, TAR_LAYER_MEDIA_TYPE)]);
+    let manifest = image_manifest(&[(expected_digest, TAR_LAYER_MEDIA_TYPE, layer.len() as u64)]);
     let manifest_digest = sha256_digest(&manifest);
     let server = MockServer::new();
     server.respond(manifest_response(manifest, &manifest_digest));
@@ -150,8 +150,16 @@ fn later_layer_failure() {
     let corrupt_layer = b"not a tar archive".to_vec();
     let corrupt_digest = sha256_digest(&corrupt_layer);
     let manifest = image_manifest(&[
-        (&valid_digest, TAR_LAYER_MEDIA_TYPE),
-        (&corrupt_digest, TAR_LAYER_MEDIA_TYPE),
+        (
+            &valid_digest,
+            TAR_LAYER_MEDIA_TYPE,
+            valid_layer.len() as u64,
+        ),
+        (
+            &corrupt_digest,
+            TAR_LAYER_MEDIA_TYPE,
+            corrupt_layer.len() as u64,
+        ),
     ]);
     let manifest_digest = sha256_digest(&manifest);
     let server = MockServer::new();
@@ -222,13 +230,14 @@ fn tar_layer(files: &[(&str, &[u8])]) -> Vec<u8> {
     bytes
 }
 
-fn image_manifest(layers: &[(&str, &str)]) -> Vec<u8> {
+fn image_manifest(layers: &[(&str, &str, u64)]) -> Vec<u8> {
     let layers = layers
         .iter()
-        .map(|(digest, media_type)| {
+        .map(|(digest, media_type, size)| {
             serde_json::json!({
                 "digest": digest,
                 "mediaType": media_type,
+                "size": size,
             })
         })
         .collect::<Vec<_>>();

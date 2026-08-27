@@ -19,6 +19,7 @@ pub struct ImageIndex {
 pub struct Descriptor {
     pub digest: String,
     pub media_type: String,
+    pub size: u64,
     pub platform: Option<Platform>,
 }
 

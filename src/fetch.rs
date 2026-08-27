@@ -173,6 +173,7 @@ impl RegistryClient {
             reference.repository,
             specifier.as_typeless_str(),
         );
+        eprintln!("requesting manifest {}", reference);
         let response = self
             .call_get_with_auth_retry(&reference.registry, &path, |request| {
                 request.header("Accept", accept.as_str())
@@ -209,9 +210,14 @@ impl RegistryClient {
         &mut self,
         reference: &Reference,
         accept: &str,
+        expected_size: u64,
     ) -> anyhow::Result<impl Read> {
         let digest = reference.specifier.as_typeless_str();
         let path = format!("/v2/{}/blobs/{digest}", reference.repository);
+        eprintln!(
+            "requesting layer {} ({} bytes) from {}",
+            digest, expected_size, reference.registry
+        );
         let response = self
             .call_get_with_auth_retry(&reference.registry, &path, |request| {
                 request.header("Accept", accept)
@@ -295,7 +301,7 @@ impl RegistryClient {
             layer_reference.specifier = Specifier::Digest(layer.digest.clone());
 
             let reader = self
-                .fetch_blob_reader(&layer_reference, &layer.media_type)
+                .fetch_blob_reader(&layer_reference, &layer.media_type, layer.size)
                 .with_context(|| format!("failed to fetch layer {}", layer.digest))?;
 
             storage

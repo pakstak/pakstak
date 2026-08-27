@@ -54,6 +54,7 @@ pub fn fetch_bearer_token(
         request = request.query("scope", scope);
     }
 
+    eprintln!("requesting registry auth token from {}", challenge.realm);
     let mut response = request.call().with_context(|| {
         format!(
             "registry auth token request failed: GET {}",
